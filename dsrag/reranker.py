@@ -1,7 +1,20 @@
 from abc import ABC, abstractmethod
+import math
 import os
-from dsrag.utils.imports import cohere, voyageai
+from typing import Optional
+
+import requests
 from scipy.stats import beta
+
+from dsrag.utils import hoonify
+from dsrag.utils.imports import (
+    cohere,
+    voyageai,
+    onnxruntime,
+    tokenizers,
+    sentence_transformers,
+    huggingface_hub,
+)
 
 
 class Reranker(ABC):
@@ -127,4 +140,327 @@ class NoReranker(Reranker):
         base_dict.update({
             'ignore_absolute_relevance': self.ignore_absolute_relevance,
         })
+        return base_dict
+
+class OnDeviceReranker(Reranker):
+    """
+    A cross-encoder that runs in THIS process, with no network call.
+
+    Every other reranker here is an HTTP client, which makes reranking a hop
+    whose latency and availability belong to somebody else. That is a poor fit
+    for three situations this class exists to serve:
+
+      - an air-gapped install, where there is no reranking endpoint to call;
+      - a latency budget, where a cross-encoder over a few dozen candidates is
+        single-digit milliseconds locally and a round trip is not;
+      - a confidentiality boundary that passages must not cross.
+
+    Two backends, because two genuinely different machines run this. `onnx`
+    needs onnxruntime and tokenizers — no torch, CPU-only, and the quantized
+    export is small enough for an appliance. `sentence_transformers` is for a
+    machine that already has torch and would rather not manage an export.
+    `auto` prefers onnx and falls back.
+
+    The model loads LAZILY, on the first rerank rather than in `__init__`.
+    A KnowledgeBase is routinely constructed to read its config — `from_dict`
+    does exactly that — and paying a model load for a constructor that may
+    never rerank anything is how a config read turns into a download.
+    """
+
+    #: Ordered candidates for the ONNX graph inside a model directory. Exports
+    #: disagree on where they put it, and a quantized export is preferred
+    #: because on-device is precisely where the size matters.
+    ONNX_CANDIDATES = (
+        "onnx/model_quantized.onnx",
+        "onnx/model.onnx",
+        "model_quantized.onnx",
+        "model.onnx",
+    )
+
+    def __init__(
+        self,
+        model: str = "BAAI/bge-reranker-v2-m3",
+        backend: str = "auto",
+        model_dir: Optional[str] = None,
+        max_length: int = 512,
+        batch_size: int = 16,
+        a: float = 0.4,
+        b: float = 0.4,
+    ):
+        """
+        - model: repo id, or a local directory when `model_dir` is not given.
+        - backend: "auto" | "onnx" | "sentence_transformers".
+        - model_dir: a local directory to load from. Set this for an air-gapped
+          install; it is what makes the class work with no network at all.
+        - max_length: token ceiling per query/passage pair. Pairs longer than
+          this are truncated from the passage end.
+        - batch_size: pairs scored per forward pass.
+        - a, b: Beta CDF shape parameters for `transform`, as on the hosted
+          rerankers above. These can be adjusted to change the distribution
+          shape. The defaults match CohereReranker's, and for the same reason:
+          a cross-encoder's squashed output is bimodal near 0 and 1, and a
+          U-shaped Beta is what spreads it back out. They are symmetric, so a
+          neutral logit maps to a neutral 0.5.
+        """
+        if backend not in ("auto", "onnx", "sentence_transformers"):
+            raise ValueError(
+                f"Unknown backend: {backend!r}. Expected 'auto', 'onnx' or 'sentence_transformers'."
+            )
+        self.model = model
+        self.backend = backend
+        self.model_dir = model_dir
+        self.max_length = max_length
+        self.batch_size = batch_size
+        self.a = a
+        self.b = b
+
+        self._session = None
+        self._tokenizer = None
+        self._cross_encoder = None
+        self._resolved_backend = None
+
+    # ─── Model loading ────────────────────────────────────────────────────
+
+    def _resolve_model_dir(self) -> str:
+        if self.model_dir is not None:
+            return self.model_dir
+        if os.path.isdir(self.model):
+            return self.model
+        return huggingface_hub.snapshot_download(repo_id=self.model)
+
+    def _load_onnx(self):
+        directory = self._resolve_model_dir()
+
+        graph = next(
+            (
+                os.path.join(directory, name)
+                for name in self.ONNX_CANDIDATES
+                if os.path.isfile(os.path.join(directory, name))
+            ),
+            None,
+        )
+        if graph is None:
+            raise FileNotFoundError(
+                f"No ONNX graph in {directory}. Looked for: {', '.join(self.ONNX_CANDIDATES)}. "
+                f"Export one with optimum, or use backend='sentence_transformers'."
+            )
+
+        tokenizer_file = os.path.join(directory, "tokenizer.json")
+        if not os.path.isfile(tokenizer_file):
+            raise FileNotFoundError(f"No tokenizer.json in {directory}.")
+
+        self._session = onnxruntime.InferenceSession(
+            graph, providers=["CPUExecutionProvider"]
+        )
+        self._tokenizer = tokenizers.Tokenizer.from_file(tokenizer_file)
+        self._tokenizer.enable_truncation(max_length=self.max_length)
+        self._tokenizer.enable_padding()
+
+    def _load_sentence_transformers(self):
+        self._cross_encoder = sentence_transformers.CrossEncoder(
+            self.model_dir or self.model, max_length=self.max_length
+        )
+
+    def _ensure_loaded(self):
+        """Load once, on first use. Idempotent."""
+        if self._resolved_backend is not None:
+            return
+
+        if self.backend == "onnx":
+            self._load_onnx()
+            self._resolved_backend = "onnx"
+            return
+        if self.backend == "sentence_transformers":
+            self._load_sentence_transformers()
+            self._resolved_backend = "sentence_transformers"
+            return
+
+        # auto: prefer onnx, and keep the reason the preferred path failed —
+        # a fallback that swallows the first error leaves you debugging the
+        # second backend for a problem that lives in the first.
+        try:
+            self._load_onnx()
+            self._resolved_backend = "onnx"
+        except Exception as onnx_error:
+            try:
+                self._load_sentence_transformers()
+                self._resolved_backend = "sentence_transformers"
+            except Exception as st_error:
+                raise RuntimeError(
+                    f"No on-device backend could load {self.model!r}. "
+                    f"onnx: {onnx_error}. sentence_transformers: {st_error}."
+                ) from st_error
+
+    # ─── Scoring ──────────────────────────────────────────────────────────
+
+    def _score_onnx(self, pairs: list) -> list:
+        scores = []
+        for start in range(0, len(pairs), self.batch_size):
+            batch = pairs[start : start + self.batch_size]
+            encodings = self._tokenizer.encode_batch(batch)
+
+            # Feed only the inputs this graph actually declares. Exports differ
+            # on token_type_ids, and passing an input the graph does not have
+            # is a hard onnxruntime error rather than an ignored key.
+            available = {
+                "input_ids": lambda e: [x.ids for x in e],
+                "attention_mask": lambda e: [x.attention_mask for x in e],
+                "token_type_ids": lambda e: [x.type_ids for x in e],
+            }
+            feed = {
+                declared.name: available[declared.name](encodings)
+                for declared in self._session.get_inputs()
+                if declared.name in available
+            }
+
+            logits = self._session.run(None, feed)[0]
+            scores.extend(float(row[0]) for row in logits)
+        return scores
+
+    def _score_sentence_transformers(self, pairs: list) -> list:
+        predictions = self._cross_encoder.predict(pairs, batch_size=self.batch_size)
+        return [float(score) for score in predictions]
+
+    def score_pairs(self, pairs: list) -> list:
+        """
+        Raw cross-encoder logits for (query, passage) pairs, in input order.
+
+        Separate from `rerank_search_results` so the ordering and calibration
+        above it can be tested without a model on disk.
+        """
+        if not pairs:
+            return []
+        self._ensure_loaded()
+        if self._resolved_backend == "onnx":
+            return self._score_onnx(pairs)
+        return self._score_sentence_transformers(pairs)
+
+    def transform(self, x):
+        """
+        Map a raw logit onto a value distributed between 0 and 1.
+
+        Two steps, unlike the hosted rerankers: a cross-encoder emits an
+        unbounded logit rather than a relevance probability, so it is squashed
+        with a logistic first and only then reshaped by the Beta CDF that RSE's
+        absolute-relevance arithmetic expects.
+        """
+        probability = 1.0 / (1.0 + math.exp(-x))
+        return beta.cdf(probability, self.a, self.b)
+
+    def rerank_search_results(self, query: str, search_results: list) -> list:
+        """
+        Rerank locally. Identical contract to the hosted rerankers above.
+        """
+        if not search_results:
+            return []
+
+        pairs = [
+            [
+                query,
+                f"{result['metadata']['chunk_header']}\n\n{result['metadata']['chunk_text']}",
+            ]
+            for result in search_results
+        ]
+        scores = self.score_pairs(pairs)
+
+        order = sorted(range(len(search_results)), key=lambda i: scores[i], reverse=True)
+        reranked_search_results = [search_results[i] for i in order]
+        for position, i in enumerate(order):
+            reranked_search_results[position]["similarity"] = self.transform(scores[i])
+        return reranked_search_results
+
+    def to_dict(self):
+        base_dict = super().to_dict()
+        base_dict.update(
+            {
+                "model": self.model,
+                "backend": self.backend,
+                "model_dir": self.model_dir,
+                "max_length": self.max_length,
+                "batch_size": self.batch_size,
+                "a": self.a,
+                "b": self.b,
+            }
+        )
+        return base_dict
+
+
+class HoonifyReranker(Reranker):
+    """
+    Hoonify's hosted reranker.
+
+    Hoonify is OpenAI-compatible for chat and embeddings, but reranking is not
+    part of that wire format — so this is the `/rerank` shape the hosted
+    rerankers converged on (`model`, `query`, `documents` in, `results` with
+    `index` and `relevance_score` out), spoken with `requests` rather than the
+    OpenAI SDK, which has no method for it.
+    """
+
+    def __init__(
+        self,
+        model: str = "bge-reranker-v2-m3",
+        timeout: float = 30.0,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
+        """
+        `base_url` and `api_key` default to the environment. Passing them
+        explicitly is what lets one caller drive two endpoints in the same
+        process — a sidecar serving a tenancy on a private endpoint alongside
+        one on the public default.
+        """
+        self.model = model
+        self.timeout = timeout
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def _endpoint(self) -> str:
+        return (self.base_url.rstrip("/") if self.base_url else hoonify.base_url()) + "/rerank"
+
+    def _key(self) -> str:
+        return self.api_key or hoonify.api_key()
+
+    def transform(self, x):
+        """
+        Map the absolute relevance value onto something more uniformly
+        distributed between 0 and 1, as RSE's absolute-relevance arithmetic
+        requires. These can be adjusted to change the distribution shape.
+        """
+        a, b = 0.4, 0.4
+        return beta.cdf(x, a, b)
+
+    def rerank_search_results(self, query: str, search_results: list) -> list:
+        if not search_results:
+            return []
+
+        documents = [
+            f"{result['metadata']['chunk_header']}\n\n{result['metadata']['chunk_text']}"
+            for result in search_results
+        ]
+
+        response = requests.post(
+            self._endpoint(),
+            headers={"Authorization": f"Bearer {self._key()}"},
+            json={"model": self.model, "query": query, "documents": documents},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        results = response.json()["results"]
+
+        reranked_search_results = [search_results[r["index"]] for r in results]
+        for i, result in enumerate(reranked_search_results):
+            result["similarity"] = self.transform(results[i]["relevance_score"])
+        return reranked_search_results
+
+    def to_dict(self):
+        base_dict = super().to_dict()
+        base_dict.update(
+            {
+                "model": self.model,
+                "timeout": self.timeout,
+                "base_url": self.base_url,
+                # The key is deliberately absent: to_dict output is written to
+                # a KnowledgeBase's config on disk.
+            }
+        )
         return base_dict

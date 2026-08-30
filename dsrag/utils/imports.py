@@ -73,3 +73,12 @@ boto3 = LazyLoader("boto3")
 faiss = LazyLoader("faiss", "faiss-cpu")
 psycopg2 = LazyLoader("psycopg2", "psycopg2-binary")
 pgvector = LazyLoader("pgvector")
+
+# On-device inference. Both backends are optional and mutually exclusive in
+# practice: onnxruntime is the appliance path (CPU, quantized, no torch), and
+# sentence-transformers is the convenience path for a machine that already has
+# torch installed.
+onnxruntime = LazyLoader("onnxruntime")
+tokenizers = LazyLoader("tokenizers")
+sentence_transformers = LazyLoader("sentence_transformers")
+huggingface_hub = LazyLoader("huggingface_hub")
