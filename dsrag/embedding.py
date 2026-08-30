@@ -2,6 +2,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Optional
 from dsrag.database.vector.types import Vector
+from dsrag.utils import hoonify
 from dsrag.utils.imports import openai, cohere, voyageai, ollama
 
 
@@ -17,6 +18,8 @@ dimensionality = {
     "llama3": 4096,
     "all-minilm": 384,
     "nomic-embed-text": 768,
+    "bge-m3": 1024,
+    "bge-large-en-v1.5": 1024,
 }
 
 
@@ -179,6 +182,46 @@ class OllamaEmbedding(Embedding):
         else:
             response = self.client.embeddings(model=self.model, prompt=text)
             return response["embedding"]
+
+    def to_dict(self):
+        base_dict = super().to_dict()
+        base_dict.update({"model": self.model})
+        return base_dict
+
+class HoonifyEmbedding(Embedding):
+    """
+    Hoonify's embedding endpoint, OpenAI-compatible.
+
+    `dimension` is looked up from the table above when the caller does not pass
+    one, because getting it wrong is not a runtime error — it is a vector store
+    built at the wrong width, discovered at the first query.
+    """
+
+    def __init__(self, model: str = "bge-m3", dimension: Optional[int] = None):
+        super().__init__(dimension)
+        self.model = model
+        self.client = openai.OpenAI(
+            api_key=hoonify.api_key(), base_url=hoonify.base_url()
+        )
+
+        if dimension is None:
+            try:
+                self.dimension = dimensionality[model]
+            except KeyError:
+                raise ValueError(
+                    f"Dimension for model {model} is unknown. Please provide the dimension manually."
+                )
+        else:
+            self.dimension = dimension
+
+    def get_embeddings(self, text: list[str], input_type: Optional[str] = None) -> list[Vector]:
+        # No `dimensions` argument: unlike OpenAI's v3 models, the open
+        # embedders Hoonify serves emit a fixed width and reject the parameter.
+        response = self.client.embeddings.create(
+            input=[text] if isinstance(text, str) else text, model=self.model
+        )
+        embeddings = [item.embedding for item in response.data]
+        return embeddings[0] if isinstance(text, str) else embeddings
 
     def to_dict(self):
         base_dict = super().to_dict()

@@ -1,7 +1,11 @@
 from abc import ABC, abstractmethod
 import os
-from dsrag.utils.imports import openai, anthropic, ollama
-import google.generativeai as genai
+from dsrag.utils import hoonify
+# `genai` is the LazyLoader, not the module: importing google.generativeai
+# eagerly made every consumer of this file — the sidecar included — install a
+# Gemini SDK it may never call. Every use below is inside a method, so the
+# loader resolves it at call time.
+from dsrag.utils.imports import openai, anthropic, ollama, genai
 
 
 class LLM(ABC):
@@ -253,6 +257,38 @@ class GeminiAPI(LLM):
         base_dict = super().to_dict()
         base_dict.update({
             'model': self.model_name,
+            'temperature': self.temperature,
+            'max_tokens': self.max_tokens,
+        })
+        return base_dict
+class HoonifyChatAPI(LLM):
+    """
+    Hoonify — enterprise inference over open models, OpenAI-compatible.
+
+    Nothing here is Hoonify-specific except where the base URL and key come
+    from, which is the point: pointing this at a private endpoint, or at a
+    different provider entirely, is a value change rather than a code change.
+    """
+
+    def __init__(self, model: str = "llama-3.3-70b-instruct", temperature: float = 0.2, max_tokens: int = 1000):
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def make_llm_call(self, chat_messages: list[dict]) -> str:
+        client = openai.OpenAI(api_key=hoonify.api_key(), base_url=hoonify.base_url())
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=chat_messages,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+        )
+        return response.choices[0].message.content.strip()
+
+    def to_dict(self):
+        base_dict = super().to_dict()
+        base_dict.update({
+            'model': self.model,
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
         })

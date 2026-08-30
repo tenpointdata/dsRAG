@@ -71,13 +71,23 @@ anthropic = ["anthropic>=0.37.1"]
 google-generativeai = ["google-generativeai>=0.8.3"]
 google-genai = ["google-genai>=0.1.0"]
 
+# Hoonify speaks the OpenAI wire format for chat and embeddings, and plain HTTP
+# for reranking, so it needs no package of its own beyond `openai`.
+hoonify = ["dsrag[openai]"]
+
+# On-device reranking. `ondevice` is the appliance path: CPU, quantized, and no
+# torch anywhere in the tree. `sentence-transformers` is the alternative for a
+# machine that already has torch and would rather not manage an ONNX export.
+ondevice = ["onnxruntime>=1.17.0", "tokenizers>=0.15.0", "huggingface-hub>=0.20.0"]
+sentence-transformers = ["sentence-transformers>=3.0.0"]
+
 # Convenience groups
 all-dbs = [
     "dsrag[faiss,chroma,weaviate,qdrant,milvus,pinecone,postgres,boto3]"
 ]
 
 all-models = [
-    "dsrag[openai,cohere,voyageai,ollama,anthropic,google-generativeai,google-genai]"
+    "dsrag[openai,cohere,voyageai,ollama,anthropic,google-generativeai,google-genai,hoonify,ondevice]"
 ]
 
 # Complete installation with all optional dependencies
