@@ -197,11 +197,22 @@ class HoonifyEmbedding(Embedding):
     built at the wrong width, discovered at the first query.
     """
 
-    def __init__(self, model: str = "bge-m3", dimension: Optional[int] = None):
+    def __init__(
+        self,
+        model: str = "bge-m3",
+        dimension: Optional[int] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
         super().__init__(dimension)
         self.model = model
+        self.base_url = base_url
+        # `base_url` and `api_key` default to the environment. Passing them
+        # explicitly is what lets one caller drive two endpoints in the same
+        # process.
         self.client = openai.OpenAI(
-            api_key=hoonify.api_key(), base_url=hoonify.base_url()
+            api_key=api_key or hoonify.api_key(),
+            base_url=base_url or hoonify.base_url(),
         )
 
         if dimension is None:
@@ -225,5 +236,7 @@ class HoonifyEmbedding(Embedding):
 
     def to_dict(self):
         base_dict = super().to_dict()
-        base_dict.update({"model": self.model})
+        # The key is deliberately absent: to_dict output is written to a
+        # KnowledgeBase's config on disk.
+        base_dict.update({"model": self.model, "base_url": self.base_url})
         return base_dict

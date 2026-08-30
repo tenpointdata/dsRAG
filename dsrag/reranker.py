@@ -396,9 +396,29 @@ class HoonifyReranker(Reranker):
     OpenAI SDK, which has no method for it.
     """
 
-    def __init__(self, model: str = "bge-reranker-v2-m3", timeout: float = 30.0):
+    def __init__(
+        self,
+        model: str = "bge-reranker-v2-m3",
+        timeout: float = 30.0,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
+        """
+        `base_url` and `api_key` default to the environment. Passing them
+        explicitly is what lets one caller drive two endpoints in the same
+        process — a sidecar serving a tenancy on a private endpoint alongside
+        one on the public default.
+        """
         self.model = model
         self.timeout = timeout
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def _endpoint(self) -> str:
+        return (self.base_url.rstrip("/") if self.base_url else hoonify.base_url()) + "/rerank"
+
+    def _key(self) -> str:
+        return self.api_key or hoonify.api_key()
 
     def transform(self, x):
         """
@@ -419,8 +439,8 @@ class HoonifyReranker(Reranker):
         ]
 
         response = requests.post(
-            f"{hoonify.base_url()}/rerank",
-            headers={"Authorization": f"Bearer {hoonify.api_key()}"},
+            self._endpoint(),
+            headers={"Authorization": f"Bearer {self._key()}"},
             json={"model": self.model, "query": query, "documents": documents},
             timeout=self.timeout,
         )
@@ -434,5 +454,13 @@ class HoonifyReranker(Reranker):
 
     def to_dict(self):
         base_dict = super().to_dict()
-        base_dict.update({"model": self.model, "timeout": self.timeout})
+        base_dict.update(
+            {
+                "model": self.model,
+                "timeout": self.timeout,
+                "base_url": self.base_url,
+                # The key is deliberately absent: to_dict output is written to
+                # a KnowledgeBase's config on disk.
+            }
+        )
         return base_dict

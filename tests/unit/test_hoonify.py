@@ -84,12 +84,44 @@ class TestHoonifyReranker(unittest.TestCase):
             self.assertEqual(reranker.rerank_search_results("q", []), [])
         post.assert_not_called()
 
+    def test_explicit_endpoint_overrides_the_environment(self):
+        """
+        What lets one process drive two endpoints: a tenancy on a private
+        endpoint alongside one on the public default.
+        """
+        reranker = HoonifyReranker(base_url="https://other.example/v1/", api_key="other-key")
+        with mock.patch(
+            "dsrag.reranker.requests.post", return_value=self._response([])
+        ) as post:
+            reranker.rerank_search_results("q", [result("only")])
+
+        self.assertEqual(post.call_args[0][0], "https://other.example/v1/rerank")
+        self.assertEqual(
+            post.call_args[1]["headers"]["Authorization"], "Bearer other-key"
+        )
+
+    def test_explicit_key_removes_the_need_for_the_environment(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            reranker = HoonifyReranker(base_url="https://other.example/v1", api_key="k")
+            self.assertEqual(reranker._endpoint(), "https://other.example/v1/rerank")
+            self.assertEqual(reranker._key(), "k")
+
     def test_save_and_load_from_dict(self):
         reranker = HoonifyReranker(model="bge-reranker-base", timeout=5.0)
         loaded = Reranker.from_dict(reranker.to_dict())
         self.assertIsInstance(loaded, HoonifyReranker)
         self.assertEqual(loaded.model, "bge-reranker-base")
         self.assertEqual(loaded.timeout, 5.0)
+
+    def test_to_dict_never_carries_the_key(self):
+        """
+        `to_dict` output is written to a KnowledgeBase's config on disk. A key
+        in there is a credential at rest that nobody chose to store.
+        """
+        config = HoonifyReranker(base_url="https://other.example/v1", api_key="secret").to_dict()
+        self.assertNotIn("api_key", config)
+        self.assertNotIn("secret", str(config))
+        self.assertEqual(config["base_url"], "https://other.example/v1")
 
 
 if __name__ == "__main__":

@@ -270,13 +270,24 @@ class HoonifyChatAPI(LLM):
     different provider entirely, is a value change rather than a code change.
     """
 
-    def __init__(self, model: str = "llama-3.3-70b-instruct", temperature: float = 0.2, max_tokens: int = 1000):
+    def __init__(self, model: str = "llama-3.3-70b-instruct", temperature: float = 0.2, max_tokens: int = 1000,
+                 base_url: str = None, api_key: str = None):
+        """
+        `base_url` and `api_key` default to the environment. Passing them
+        explicitly is what lets one caller drive two endpoints in the same
+        process.
+        """
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.base_url = base_url
+        self.api_key = api_key
 
     def make_llm_call(self, chat_messages: list[dict]) -> str:
-        client = openai.OpenAI(api_key=hoonify.api_key(), base_url=hoonify.base_url())
+        client = openai.OpenAI(
+            api_key=self.api_key or hoonify.api_key(),
+            base_url=self.base_url or hoonify.base_url(),
+        )
         response = client.chat.completions.create(
             model=self.model,
             messages=chat_messages,
@@ -291,5 +302,8 @@ class HoonifyChatAPI(LLM):
             'model': self.model,
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
+            'base_url': self.base_url,
+            # The key is deliberately absent: to_dict output is written to a
+            # KnowledgeBase's config on disk.
         })
         return base_dict
