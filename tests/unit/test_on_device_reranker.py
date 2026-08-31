@@ -1,10 +1,54 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from dsrag import reranker as reranker_module
 from dsrag.reranker import Reranker, OnDeviceReranker
+
+
+class Encoding:
+    def __init__(self, index):
+        self.ids = [index]
+        self.attention_mask = [1]
+        self.type_ids = [0]
+
+
+class RecordingTokenizer:
+    """Records the batch it was handed, which is the shape the session sees."""
+
+    def __init__(self):
+        self.batches = []
+
+    def encode_batch(self, batch):
+        self.batches.append(list(batch))
+        return [Encoding(index) for index in range(len(batch))]
+
+
+class StubRuntime:
+    """Stands in for the lazily-imported onnxruntime, which CI does not have."""
+
+    def __init__(self, providers):
+        self.providers = providers
+
+    def get_available_providers(self):
+        return self.providers
+
+
+class StubSession:
+    """One logit per encoded row, in row order."""
+
+    class Input:
+        def __init__(self, name):
+            self.name = name
+
+    def get_inputs(self):
+        return [self.Input("input_ids"), self.Input("attention_mask")]
+
+    def run(self, _outputs, feed):
+        return [[[float(index)] for index in range(len(feed["input_ids"]))]]
 
 
 def result(text, header=""):
@@ -86,6 +130,24 @@ class TestOnDeviceReranker(unittest.TestCase):
         self.assertIsNone(reranker._cross_encoder)
         self.assertIsNone(reranker._resolved_backend)
 
+    def test_threads_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            OnDeviceReranker(threads=0)
+
+    def test_warm_loads_the_model_and_runs_a_pair_through_it(self):
+        """
+        The first question must not be the one that pays the model load.
+
+        A deployment calls this at startup precisely because a download and a
+        graph compile are far outside any rerank timeout — so warming has to
+        touch the model, not merely construct it.
+        """
+        reranker = StubbedOnDeviceReranker({"warm": 0.0})
+        reranker._resolved_backend = "onnx"
+
+        self.assertEqual(reranker.warm(), "onnx")
+        self.assertEqual(reranker.pairs_seen, [["warm", "warm"]])
+
     def test_save_and_load_from_dict(self):
         reranker = OnDeviceReranker(
             model="BAAI/bge-reranker-base",
@@ -93,6 +155,8 @@ class TestOnDeviceReranker(unittest.TestCase):
             model_dir="/opt/models/reranker",
             max_length=256,
             batch_size=4,
+            threads=2,
+            providers=["CPUExecutionProvider"],
         )
         loaded = Reranker.from_dict(reranker.to_dict())
 
@@ -102,6 +166,87 @@ class TestOnDeviceReranker(unittest.TestCase):
         self.assertEqual(loaded.model_dir, "/opt/models/reranker")
         self.assertEqual(loaded.max_length, 256)
         self.assertEqual(loaded.batch_size, 4)
+        self.assertEqual(loaded.threads, 2)
+        self.assertEqual(loaded.providers, ["CPUExecutionProvider"])
+
+
+class TestOnDeviceRerankerHardwareSelection(unittest.TestCase):
+    """
+    Which provider, which graph, and which shape — decided from the hardware.
+
+    None of it can be exercised on the machine CI runs on, and all of it is
+    exactly what a machine-dependent path gets wrong silently: an accelerator
+    handed a quantized graph runs it on the CPU anyway, and an accelerator
+    handed a fresh input shape per batch recompiles instead of inferring.
+    """
+
+    def test_an_explicit_provider_list_wins(self):
+        reranker = OnDeviceReranker(providers=["CPUExecutionProvider"])
+        self.assertEqual(reranker.resolve_providers(), ["CPUExecutionProvider"])
+
+    def test_cpu_elsewhere(self):
+        reranker = OnDeviceReranker()
+        with mock.patch.object(reranker_module, "is_apple_silicon", return_value=False):
+            self.assertEqual(reranker.resolve_providers(), ["CPUExecutionProvider"])
+
+    def test_coreml_first_on_apple_silicon(self):
+        reranker = OnDeviceReranker()
+        with mock.patch.object(
+            reranker_module, "is_apple_silicon", return_value=True
+        ), mock.patch.object(
+            reranker_module,
+            "onnxruntime",
+            StubRuntime(["CoreMLExecutionProvider", "CPUExecutionProvider"]),
+        ):
+            self.assertEqual(
+                reranker.resolve_providers(),
+                ["CoreMLExecutionProvider", "CPUExecutionProvider"],
+            )
+
+    def test_cpu_on_an_apple_build_without_coreml(self):
+        """A conda or a source build may have no CoreML provider at all."""
+        reranker = OnDeviceReranker()
+        with mock.patch.object(
+            reranker_module, "is_apple_silicon", return_value=True
+        ), mock.patch.object(
+            reranker_module, "onnxruntime", StubRuntime(["CPUExecutionProvider"])
+        ):
+            self.assertEqual(reranker.resolve_providers(), ["CPUExecutionProvider"])
+
+    def test_the_quantized_graph_is_preferred_on_a_cpu(self):
+        candidates = OnDeviceReranker().graph_candidates(["CPUExecutionProvider"])
+        self.assertIn("quantized", candidates[0])
+
+    def test_the_float_graph_is_preferred_on_an_accelerator(self):
+        """CoreML has no int8 kernels: a quantized graph goes back to the CPU."""
+        candidates = OnDeviceReranker().graph_candidates(
+            ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+        )
+        self.assertNotIn("quantized", candidates[0])
+
+    def test_a_short_batch_is_padded_to_one_shape_on_an_accelerator(self):
+        reranker = OnDeviceReranker(batch_size=4)
+        reranker._resolved_backend = "onnx"
+        reranker._fixed_shape = True
+        reranker._tokenizer = RecordingTokenizer()
+        reranker._session = StubSession()
+
+        scores = reranker._score_onnx([["q", "a"], ["q", "b"]])
+
+        self.assertEqual(scores, [0.0, 1.0])
+        self.assertEqual(len(reranker._tokenizer.batches[0]), 4)
+
+    def test_a_short_batch_is_not_padded_on_a_cpu(self):
+        """Padding is pure waste where every shape is compiled on the fly."""
+        reranker = OnDeviceReranker(batch_size=4)
+        reranker._resolved_backend = "onnx"
+        reranker._tokenizer = RecordingTokenizer()
+        reranker._session = StubSession()
+
+        scores = reranker._score_onnx([["q", "a"], ["q", "b"]])
+
+        self.assertEqual(scores, [0.0, 1.0])
+        self.assertEqual(len(reranker._tokenizer.batches[0]), 2)
 
 
 if __name__ == "__main__":

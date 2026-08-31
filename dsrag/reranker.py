@@ -7,6 +7,7 @@ import requests
 from scipy.stats import beta
 
 from dsrag.utils import hoonify
+from dsrag.utils.hardware import is_apple_silicon, performance_cores
 from dsrag.utils.imports import (
     cohere,
     voyageai,
@@ -156,10 +157,18 @@ class OnDeviceReranker(Reranker):
       - a confidentiality boundary that passages must not cross.
 
     Two backends, because two genuinely different machines run this. `onnx`
-    needs onnxruntime and tokenizers — no torch, CPU-only, and the quantized
-    export is small enough for an appliance. `sentence_transformers` is for a
-    machine that already has torch and would rather not manage an export.
-    `auto` prefers onnx and falls back.
+    needs onnxruntime and tokenizers — no torch, and the quantized export is
+    small enough for an appliance. `sentence_transformers` is for a machine
+    that already has torch and would rather not manage an export. `auto`
+    prefers onnx and falls back.
+
+    NEITHER BACKEND IS CPU-ONLY BY ASSUMPTION. An arm64 Mac has a GPU and a
+    Neural Engine, and each backend reaches them differently: sentence-
+    transformers selects MPS on its own, while onnxruntime does not select
+    CoreML on its own and is given it here, along with the float graph it needs
+    and one input shape to compile. Thread counts are derived from the hardware
+    for the same reason — onnxruntime's defaults count efficiency cores, and a
+    container's core count is the host's. See `dsrag.utils.hardware`.
 
     The model loads LAZILY, on the first rerank rather than in `__init__`.
     A KnowledgeBase is routinely constructed to read its config — `from_dict`
@@ -177,6 +186,26 @@ class OnDeviceReranker(Reranker):
         "model.onnx",
     )
 
+    #: The same graphs in the order an ACCELERATOR wants them.
+    #:
+    #: CoreML runs float ops on the GPU and the Neural Engine and has no int8
+    #: kernels, so a quantized graph is partitioned back onto the CPU node by
+    #: node — which costs the partition boundaries on top of the CPU work it
+    #: was trying to avoid. Where an accelerator is present the float export is
+    #: the fast graph, and the size argument for quantization does not apply to
+    #: a machine that has the memory.
+    ACCELERATED_ONNX_CANDIDATES = (
+        "onnx/model.onnx",
+        "model.onnx",
+        "onnx/model_quantized.onnx",
+        "model_quantized.onnx",
+    )
+
+    #: Providers tried, in order, on an arm64 Mac. CPU stays on the list: a
+    #: CoreML partition falls back per operator rather than failing, and a
+    #: machine whose onnxruntime build has no CoreML support still runs.
+    APPLE_SILICON_PROVIDERS = ("CoreMLExecutionProvider", "CPUExecutionProvider")
+
     def __init__(
         self,
         model: str = "BAAI/bge-reranker-v2-m3",
@@ -184,6 +213,8 @@ class OnDeviceReranker(Reranker):
         model_dir: Optional[str] = None,
         max_length: int = 512,
         batch_size: int = 16,
+        threads: Optional[int] = None,
+        providers: Optional[list] = None,
         a: float = 0.4,
         b: float = 0.4,
     ):
@@ -195,6 +226,12 @@ class OnDeviceReranker(Reranker):
         - max_length: token ceiling per query/passage pair. Pairs longer than
           this are truncated from the passage end.
         - batch_size: pairs scored per forward pass.
+        - threads: onnxruntime intra-op threads. None derives it from the
+          hardware, which is what onnxruntime's own default gets wrong on the
+          two machines this runs on most — see `dsrag.utils.hardware`.
+        - providers: explicit onnxruntime execution providers. None selects
+          them from the hardware. Pass `["CPUExecutionProvider"]` to hold an
+          accelerator out of a comparison.
         - a, b: Beta CDF shape parameters for `transform`, as on the hosted
           rerankers above. These can be adjusted to change the distribution
           shape. The defaults match CohereReranker's, and for the same reason:
@@ -206,11 +243,15 @@ class OnDeviceReranker(Reranker):
             raise ValueError(
                 f"Unknown backend: {backend!r}. Expected 'auto', 'onnx' or 'sentence_transformers'."
             )
+        if threads is not None and threads < 1:
+            raise ValueError(f"threads must be positive or None, got {threads!r}")
         self.model = model
         self.backend = backend
         self.model_dir = model_dir
         self.max_length = max_length
         self.batch_size = batch_size
+        self.threads = threads
+        self.providers = list(providers) if providers is not None else None
         self.a = a
         self.b = b
 
@@ -218,6 +259,8 @@ class OnDeviceReranker(Reranker):
         self._tokenizer = None
         self._cross_encoder = None
         self._resolved_backend = None
+        #: Set when the loaded session runs on an accelerator. See `_score_onnx`.
+        self._fixed_shape = False
 
     # ─── Model loading ────────────────────────────────────────────────────
 
@@ -228,20 +271,66 @@ class OnDeviceReranker(Reranker):
             return self.model
         return huggingface_hub.snapshot_download(repo_id=self.model)
 
+    def resolve_providers(self) -> list:
+        """
+        Execution providers for this machine, most capable first.
+
+        An arm64 Mac has a GPU and a Neural Engine that CoreML can reach and
+        that the CPU provider cannot, and onnxruntime does not select it on its
+        own. Everywhere else — a Linux server, and a Linux CONTAINER on an
+        arm64 Mac, which has no access to the host's accelerators whatever the
+        host is — the CPU provider is the only one that is actually there.
+        """
+        if self.providers is not None:
+            return list(self.providers)
+        if is_apple_silicon():
+            available = set(onnxruntime.get_available_providers())
+            chosen = [name for name in self.APPLE_SILICON_PROVIDERS if name in available]
+            if chosen:
+                return chosen
+        return ["CPUExecutionProvider"]
+
+    def graph_candidates(self, providers: list) -> tuple:
+        """Graph filenames in the order the chosen providers want them."""
+        accelerated = any(name != "CPUExecutionProvider" for name in providers)
+        return self.ACCELERATED_ONNX_CANDIDATES if accelerated else self.ONNX_CANDIDATES
+
+    def session_options(self):
+        """
+        Thread counts, which onnxruntime's own defaults get wrong here.
+
+        It sizes its pool from the machine's cores. That over-counts twice: an
+        Apple Silicon core count includes efficiency cores, which set the pace
+        of a parallel-for rather than adding to it, and a container's core
+        count is the host's while the cgroup admits a fraction of it. Both
+        produce a pool whose threads mostly wait for each other.
+
+        `inter_op_num_threads` is 1 deliberately. Op-level parallelism only
+        pays on a graph with independent branches; a transformer is a chain,
+        and a second pool would take threads from the one doing the work.
+        """
+        options = onnxruntime.SessionOptions()
+        options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        options.intra_op_num_threads = self.threads or performance_cores()
+        options.inter_op_num_threads = 1
+        return options
+
     def _load_onnx(self):
         directory = self._resolve_model_dir()
+        providers = self.resolve_providers()
+        candidates = self.graph_candidates(providers)
 
         graph = next(
             (
                 os.path.join(directory, name)
-                for name in self.ONNX_CANDIDATES
+                for name in candidates
                 if os.path.isfile(os.path.join(directory, name))
             ),
             None,
         )
         if graph is None:
             raise FileNotFoundError(
-                f"No ONNX graph in {directory}. Looked for: {', '.join(self.ONNX_CANDIDATES)}. "
+                f"No ONNX graph in {directory}. Looked for: {', '.join(candidates)}. "
                 f"Export one with optimum, or use backend='sentence_transformers'."
             )
 
@@ -250,13 +339,27 @@ class OnDeviceReranker(Reranker):
             raise FileNotFoundError(f"No tokenizer.json in {directory}.")
 
         self._session = onnxruntime.InferenceSession(
-            graph, providers=["CPUExecutionProvider"]
+            graph, sess_options=self.session_options(), providers=providers
         )
+        self._fixed_shape = any(name != "CPUExecutionProvider" for name in providers)
+
         self._tokenizer = tokenizers.Tokenizer.from_file(tokenizer_file)
         self._tokenizer.enable_truncation(max_length=self.max_length)
-        self._tokenizer.enable_padding()
+        # An accelerator compiles the subgraph PER INPUT SHAPE, so padding each
+        # batch to its own longest pair — the sensible thing on a CPU, where a
+        # short batch is genuinely less work — makes almost every batch a fresh
+        # compile. One length for the session is worth more than the tokens it
+        # wastes.
+        if self._fixed_shape:
+            self._tokenizer.enable_padding(length=self.max_length)
+        else:
+            self._tokenizer.enable_padding()
 
     def _load_sentence_transformers(self):
+        # No device argument on purpose: sentence-transformers selects CUDA,
+        # then MPS, then CPU on its own, so this path already reaches an Apple
+        # GPU. Naming a device here would take that away on every other
+        # machine.
         self._cross_encoder = sentence_transformers.CrossEncoder(
             self.model_dir or self.model, max_length=self.max_length
         )
@@ -297,6 +400,15 @@ class OnDeviceReranker(Reranker):
         scores = []
         for start in range(0, len(pairs), self.batch_size):
             batch = pairs[start : start + self.batch_size]
+
+            # The batch dimension is part of the shape an accelerator compiles
+            # for, so the last, short batch of every query would compile a
+            # second model. Padding it out and dropping the padding rows keeps
+            # one shape for the life of the session.
+            wanted = len(batch)
+            if self._fixed_shape and wanted < self.batch_size:
+                batch = list(batch) + [["", ""]] * (self.batch_size - wanted)
+
             encodings = self._tokenizer.encode_batch(batch)
 
             # Feed only the inputs this graph actually declares. Exports differ
@@ -314,7 +426,7 @@ class OnDeviceReranker(Reranker):
             }
 
             logits = self._session.run(None, feed)[0]
-            scores.extend(float(row[0]) for row in logits)
+            scores.extend(float(row[0]) for row in logits[:wanted])
         return scores
 
     def _score_sentence_transformers(self, pairs: list) -> list:
@@ -334,6 +446,26 @@ class OnDeviceReranker(Reranker):
         if self._resolved_backend == "onnx":
             return self._score_onnx(pairs)
         return self._score_sentence_transformers(pairs)
+
+    def warm(self) -> str:
+        """
+        Load the model and push one pair through it, before anyone is waiting.
+
+        Loading is lazy for a good reason — a KnowledgeBase constructed only to
+        read its config must not download a model — but the cost does not
+        disappear, it moves onto the FIRST question. That question pays a model
+        download, a session build and, on an accelerator, a graph compile, all
+        of which are far outside any rerank timeout: the one query that warms
+        the process is the one query that silently loses its reranking, and the
+        stack looks fine afterwards.
+
+        Called at startup, this puts the cost where nobody is waiting. Returns
+        the backend that actually loaded, so a caller can report which of the
+        two paths this machine took.
+        """
+        self._ensure_loaded()
+        self.score_pairs([["warm", "warm"]])
+        return self._resolved_backend
 
     def transform(self, x):
         """
@@ -378,6 +510,8 @@ class OnDeviceReranker(Reranker):
                 "model_dir": self.model_dir,
                 "max_length": self.max_length,
                 "batch_size": self.batch_size,
+                "threads": self.threads,
+                "providers": self.providers,
                 "a": self.a,
                 "b": self.b,
             }
