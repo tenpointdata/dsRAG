@@ -166,3 +166,9 @@ weaviate
 .DS_Store
 
 .python-version
+
+# Corpora fetched by tests/fetch_corpora.py. Downloaded on demand from their
+# publishers; a committed copy would be tens of megabytes of somebody else's
+# text, and a stale one retrieves plausibly while no longer being what the
+# publisher serves. The fixtures in tests/data/ itself stay committed.
+tests/data/corpora/
