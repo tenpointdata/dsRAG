@@ -41,6 +41,10 @@ TRUNCATION_MESSAGE = """
 Also note that the document text provided below is just the first ~{num_words} words of the document. That should be plenty for this task. Your response should still pertain to the entire document, not just the text provided below.
 """.strip()
 
+SECTION_TRUNCATION_MESSAGE = """
+Also note that the section text provided below is just the first ~{num_words} words of the section. That should be plenty for this task. Your response should still pertain to the entire section, not just the text provided below.
+""".strip()
+
 SECTION_SUMMARIZATION_PROMPT = """
 INSTRUCTIONS
 What is the following section about? 
@@ -53,6 +57,8 @@ Your response should take the form of "This section is about: X". (This part sho
 
 {non_english_addendum}
 
+{truncation_message}
+
 SECTION
 Document name: {document_title}
 Section name: {section_title}
@@ -62,11 +68,43 @@ Section name: {section_title}
 
 LANGUAGE_ADDENDUM = "YOU MUST use the same language as the document for your entire response. If the document is in English, your response MUST BE entirely in English. If the document is in another language, your response MUST BE entirely in that language."
 
+#: Characters read per token of budget before tokenising. A token is never
+#: fewer than one character, so this window always holds at least `max_tokens`
+#: of them; the multiple is slack for text that tokenises densely.
+CHARS_READ_PER_TOKEN = 20
+
+_TOKEN_ENCODER = None
+
+def token_encoder():
+    """The BPE encoder, built once.
+
+    It was built per call, which on a corpus of many documents pays the lookup
+    once per title, summary and section summary rather than once per process.
+    """
+    global _TOKEN_ENCODER
+    if _TOKEN_ENCODER is None:
+        _TOKEN_ENCODER = tiktoken.encoding_for_model('gpt-3.5-turbo')
+    return _TOKEN_ENCODER
+
 def truncate_content(content: str, max_tokens: int):
-    TOKEN_ENCODER = tiktoken.encoding_for_model('gpt-3.5-turbo')
-    tokens = TOKEN_ENCODER.encode(content, disallowed_special=())
-    truncated_tokens = tokens[:max_tokens]
-    return TOKEN_ENCODER.decode(truncated_tokens), min(len(tokens), max_tokens)
+    """The first `max_tokens` tokens of `content`, and how many were counted.
+
+    Only a bounded prefix is ever tokenised. Encoding the whole document to
+    keep its first four thousand tokens costs time and memory proportional to
+    the document — on a multi-megabyte export that is a full BPE pass and a
+    Python list of several million integers, spent entirely to be discarded.
+
+    The returned count is capped at `max_tokens`, which is how callers know
+    the content was truncated and must say so in the prompt. A prefix shorter
+    than the whole content therefore reports the cap even when it tokenises to
+    fewer, since the rest of the document is missing either way.
+    """
+    encoder = token_encoder()
+    window = content[: max_tokens * CHARS_READ_PER_TOKEN]
+    tokens = encoder.encode(window, disallowed_special=())
+    if len(tokens) <= max_tokens:
+        return window, (len(tokens) if len(window) == len(content) else max_tokens)
+    return encoder.decode(tokens[:max_tokens]), max_tokens
 
 def get_document_title(auto_context_model: LLM, document_text: str, document_title_guidance: str = "", language: str = "en"):
     # truncate the content if it's too long
@@ -122,13 +160,24 @@ def get_document_summary(auto_context_model: LLM, document_text: str, document_t
     return document_summary
 
 def get_section_summary(auto_context_model: LLM, section_text: str, document_title: str, section_title: str, section_summarization_guidance: str = "", language: str = "en"):
+    # truncate the content if it's too long
+    max_content_tokens = 8000 # if this number changes, also update num_words in the truncation message below
+    # A section is only as short as the sectioner made it: with semantic
+    # sectioning off, one section IS the whole document, and this prompt was
+    # the one place that sent it whole.
+    section_text, num_tokens = truncate_content(section_text, max_content_tokens)
+    if num_tokens < max_content_tokens:
+        truncation_message = ""
+    else:
+        truncation_message = SECTION_TRUNCATION_MESSAGE.format(num_words=6000)
+
     # see if we need to add an addendum about non-English responses
     if language != "en":
         non_english_addendum = LANGUAGE_ADDENDUM
     else:
         non_english_addendum = ""
     
-    prompt = SECTION_SUMMARIZATION_PROMPT.format(section_summarization_guidance=section_summarization_guidance, non_english_addendum=non_english_addendum, section_text=section_text, document_title=document_title, section_title=section_title)
+    prompt = SECTION_SUMMARIZATION_PROMPT.format(section_summarization_guidance=section_summarization_guidance, non_english_addendum=non_english_addendum, section_text=section_text, document_title=document_title, section_title=section_title, truncation_message=truncation_message)
     chat_messages = [{"role": "user", "content": prompt}]
     section_summary = auto_context_model.make_llm_call(chat_messages)
     return section_summary
