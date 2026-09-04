@@ -96,7 +96,8 @@ class TestRolesDecideDestination(unittest.TestCase):
     """Three kinds of column, three destinations, and only one of them embeds."""
 
     def test__attributes_and_identifiers_are_returned_but_never_embedded(self):
-        _, chunks, document = parse_and_chunk_records(TICKET, PROJECTION, [comment("2026-03-04", "d", "Checked it.")])
+        children = [comment("2026-03-04", "marguerite", "Checked it.")]
+        _, chunks, document = parse_and_chunk_records(TICKET, PROJECTION, children)
 
         self.assertEqual(document["attributes"], {"status": "open", "site_id": "214"})
         self.assertEqual(document["identifiers"], ["4821"])
@@ -104,6 +105,20 @@ class TestRolesDecideDestination(unittest.TestCase):
         embedded = "\n".join(chunk["content"] for chunk in chunks)
         self.assertNotIn("open", embedded)
         self.assertNotIn("214", embedded)
+        # A child attribute reaches the section TITLE, which is a locator. It
+        # must not thereby reach the embedded body.
+        self.assertNotIn("marguerite", embedded)
+
+    def test__a_section_title_is_a_locator_not_a_line_of_the_body(self):
+        # The title reaches the embedding through the AutoContext chunk header.
+        # Writing it into the body embeds it twice and smuggles whatever it
+        # names past the field roles.
+        sections, chunks, _ = parse_and_chunk_records(TICKET, PROJECTION, [comment("2026-03-04", "dana", "Checked it.")])
+
+        self.assertEqual(sections[1]["title"], "Comment by dana, 2026-03-04")
+        for chunk in chunks:
+            self.assertNotIn("##", chunk["content"])
+            self.assertNotIn("Comment by dana", chunk["content"])
 
     def test__ignored_columns_reach_nothing(self):
         record = dict(TICKET, _airbyte_raw_id="0f2c-loader-generated")
@@ -113,6 +128,50 @@ class TestRolesDecideDestination(unittest.TestCase):
         self.assertNotIn("loader-generated", "\n".join(chunk["content"] for chunk in chunks))
 
 
+class TestJoinAndOrder(unittest.TestCase):
+    """A document carries its own children, in their own order."""
+
+    def test__children_of_another_root_are_not_folded_in(self):
+        # The caller may hand over the whole child stream. Selecting from it is
+        # the projection's job — a comment rendered into the wrong ticket is a
+        # passage attributed to a record it did not come from.
+        mine = comment("2026-03-04", "dana", "Belongs to 4821.")
+        theirs = dict(comment("2026-03-05", "sam", "Belongs to 9999."), ticket_id="9999")
+
+        sections, chunks, _ = parse_and_chunk_records(TICKET, PROJECTION, [mine, theirs])
+
+        self.assertEqual(len(sections), 2)
+        self.assertNotIn("9999", "\n".join(chunk["content"] for chunk in chunks))
+
+    def test__a_numeric_order_column_sorts_numerically(self):
+        child = dict(PROJECTION["child"], order="position")
+        projection = dict(PROJECTION, child=child)
+        children = [
+            {"ticket_id": "4821", "position": position, "created_at": "x", "author": "a", "body": "Step %d" % position}
+            for position in (10, 2, 1)
+        ]
+
+        sections, _, _ = parse_and_chunk_records(TICKET, projection, children)
+
+        self.assertEqual([section["content"] for section in sections[1:]], ["Step 1", "Step 2", "Step 10"])
+
+    def test__composite_keys_that_would_collide_stay_distinct(self):
+        # A plain join is not injective: ("a:b", "c") and ("a", "b:c") name the
+        # same document, and one record overwrites the other with no error.
+        projection = dict(PROJECTION, grain="record", child=None, key=["left", "right"],
+                          title_template="{subject}")
+        first = render_records(dict(TICKET, left="a:b", right="c"), projection)
+        second = render_records(dict(TICKET, left="a", right="b:c"), projection)
+
+        self.assertNotEqual(first["doc_id"], second["doc_id"])
+
+    def test__a_composite_key_cannot_carry_a_child_join(self):
+        projection = dict(PROJECTION, key=["id", "site_id"])
+
+        with self.assertRaises(ProjectionError):
+            render_records(TICKET, projection, [comment("2026-03-04", "d", "Checked.")])
+
+
 class TestGuards(unittest.TestCase):
     """Each one is an acceptance criterion. A projection that breaks it is refused."""
 
@@ -120,7 +179,7 @@ class TestGuards(unittest.TestCase):
         projection = dict(PROJECTION, fields={"id": "identifier", "amount": "attribute"}, grain="record", child=None)
 
         with self.assertRaises(ProjectionError):
-            render_records({"id": "1", "amount": 42}, projection)
+            render_records({"id": "1", "subject": "A ticket", "amount": 42}, projection)
 
     def test__all_narrative_empty_is_refused_rather_than_indexed(self):
         # A title with no content indexes successfully, reports success, and
@@ -162,6 +221,26 @@ class TestGuards(unittest.TestCase):
 
         with self.assertRaises(ProjectionError):
             render_records(TICKET, projection, [comment("2026-03-04", "d", "Checked.")])
+
+    def test__record_grain_carrying_a_child_stream_is_refused(self):
+        projection = dict(PROJECTION, grain="record")
+
+        with self.assertRaises(ProjectionError):
+            render_records(TICKET, projection, [comment("2026-03-04", "d", "Checked.")])
+
+    def test__a_title_role_the_template_never_names_is_refused(self):
+        # Otherwise the role is inert: not embedded, not returned, not used to
+        # name anything, and the misassignment reads as a deliberate choice.
+        projection = dict(PROJECTION, grain="record", child=None, title_template="Ticket {id}")
+
+        with self.assertRaises(ProjectionError):
+            render_records(TICKET, projection)
+
+    def test__a_declared_attribute_that_stopped_arriving_is_drift(self):
+        projection = dict(PROJECTION, grain="record", child=None)
+
+        with self.assertRaises(ProjectionError):
+            render_records({k: v for k, v in TICKET.items() if k != "site_id"}, projection)
 
     def test__an_unknown_grain_is_refused(self):
         with self.assertRaises(ProjectionError):

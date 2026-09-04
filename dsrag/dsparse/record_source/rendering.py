@@ -39,6 +39,22 @@ def _validate_fields(fields: Dict[str, str], where: str) -> None:
             )
 
 
+def _require_title_columns_are_used(fields: Dict[str, str], title_template: str) -> None:
+    """
+    A column marked ``title`` must appear in the title template.
+
+    Otherwise the role is silently inert: the column is not embedded, not
+    returned as metadata, and not used to name anything, so a misassignment
+    reads as a deliberate choice and the column simply disappears.
+    """
+    for column in _columns_with_role(fields, "title"):
+        if "{" + column + "}" not in title_template:
+            raise ProjectionError(
+                f"field '{column}' has role 'title' but the title template does not name it; "
+                "the column would reach nothing"
+            )
+
+
 def _interpolate(template: str, record: Record, where: str) -> str:
     def substitute(match: "re.Match[str]") -> str:
         column = match.group(1)
@@ -83,12 +99,22 @@ def external_id(record: Record, key: Sequence[str]) -> str:
         value = _stringify(record[column])
         if value == "":
             raise ProjectionError(f"key column '{column}' is empty; the document would have no stable id")
-        values.append(value)
+        values.append(value.replace("\\", "\\\\").replace(":", "\\:"))
+    # Escaped before joining, because a plain join is not injective: ("a:b", "c")
+    # and ("a", "b:c") would name the SAME document, and the collision surfaces
+    # as one record overwriting another with no error anywhere.
     return ":".join(values)
 
 
 class _Builder:
-    """Accumulates lines and the section boundaries over them."""
+    """
+    Accumulates lines and the section boundaries over them.
+
+    The section TITLE is deliberately not written into the lines. It reaches the
+    embedding anyway, through the AutoContext chunk header, so writing it into
+    the body would embed it twice — and it would smuggle whatever the title
+    names past the field roles, which is the one thing they exist to decide.
+    """
 
     def __init__(self) -> None:
         self.lines: List[Dict[str, Any]] = []
@@ -103,7 +129,6 @@ class _Builder:
             self.lines.extend(str_to_lines(""))
 
         start = len(self.lines)
-        self.lines.extend(str_to_lines(f"## {title}" if title else ""))
         self.lines.extend(str_to_lines(body))
         end = len(self.lines) - 1
 
@@ -147,6 +172,10 @@ def render_records(
     child_projection = projection.get("child")
     if grain == "aggregate" and not child_projection:
         raise ProjectionError("aggregate grain declares no child stream; there is nothing to aggregate")
+    if grain != "aggregate" and child_projection:
+        # Refused rather than ignored: silently folding children into a record
+        # document, or silently dropping them, both read as working.
+        raise ProjectionError(f"grain '{grain}' declares a child stream; only aggregate grain folds children")
     if child_projection:
         _validate_fields(child_projection.get("fields", {}), "child")
 
@@ -157,7 +186,9 @@ def render_records(
         # meant to be read, nothing on the row belongs in a retrieval index.
         raise ProjectionError("projection names no narrative field; this stream produces facts, not documents")
 
-    title = _interpolate(projection.get("title_template", ""), record, "title")
+    title_template = projection.get("title_template", "")
+    _require_title_columns_are_used(fields, title_template)
+    title = _interpolate(title_template, record, "title")
     if title == "":
         raise ProjectionError("title template rendered empty; a document the reader cannot name is one nobody opens")
 
@@ -166,7 +197,8 @@ def render_records(
         builder.add_section(entry["title"], entry["body"])
 
     if child_projection:
-        for child in _ordered_children(children or [], child_projection):
+        mine = _joined_children(children or [], child_projection, record, projection.get("key", []))
+        for child in _ordered_children(mine, child_projection):
             child_fields = child_projection.get("fields", {})
             section_title = _interpolate(
                 child_projection.get("section_title_template", ""), child, "child section title"
@@ -180,16 +212,22 @@ def render_records(
             "which indexes successfully and then abstains forever"
         )
 
+    # A declared metadata column that stopped arriving is drift, and dropping it
+    # quietly ships a document whose filters no longer match what the operator
+    # configured — retrievable by nobody, and reported as a success.
     attributes: Dict[str, Any] = {}
     for column in _columns_with_role(fields, "attribute"):
-        if column in record:
-            attributes[column] = record[column]
+        if column not in record:
+            raise ProjectionError(f"attribute column '{column}' is absent from the record")
+        attributes[column] = record[column]
 
-    identifiers = [
-        value
-        for value in (_stringify(record.get(column)) for column in _columns_with_role(fields, "identifier"))
-        if value != ""
-    ]
+    identifiers = []
+    for column in _columns_with_role(fields, "identifier"):
+        if column not in record:
+            raise ProjectionError(f"identifier column '{column}' is absent from the record")
+        value = _stringify(record[column])
+        if value != "":
+            identifiers.append(value)
 
     return RecordDocument(
         doc_id=external_id(record, projection.get("key", [])),
@@ -199,6 +237,35 @@ def render_records(
         attributes=attributes,
         identifiers=identifiers,
     )
+
+
+def _joined_children(
+    children: List[Record], child_projection: Dict[str, Any], record: Record, key: Sequence[str]
+) -> List[Record]:
+    """
+    The children of THIS root, by the declared join.
+
+    Without the join every child in the batch renders into every document: one
+    ticket's page carries another ticket's comments, which is a passage
+    attributed to a record it did not come from. A caller may hand over the
+    whole child stream; selecting from it is this function's job.
+    """
+    on = child_projection.get("on")
+    if not on:
+        raise ProjectionError("child stream declares no join column; every child would render into every document")
+
+    if len(key) != 1:
+        raise ProjectionError(
+            f"child join '{on}' pairs with a single key column, but the projection declares {len(key)}; "
+            "a composite join would have to guess the pairing"
+        )
+
+    root_value = _stringify(record[key[0]])
+    for child in children:
+        if on not in child:
+            raise ProjectionError(f"child join column '{on}' is absent from a child record")
+
+    return [child for child in children if _stringify(child[on]) == root_value]
 
 
 def _ordered_children(children: List[Record], child_projection: Dict[str, Any]) -> List[Record]:
@@ -219,4 +286,7 @@ def _ordered_children(children: List[Record], child_projection: Dict[str, Any]) 
         if order not in child:
             raise ProjectionError(f"child order column '{order}' is absent from a child record")
 
+    numeric = all(not isinstance(child[order], bool) and isinstance(child[order], (int, float)) for child in children)
+    if numeric:
+        return sorted(children, key=lambda child: child[order])
     return sorted(children, key=lambda child: _stringify(child[order]))
