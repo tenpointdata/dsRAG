@@ -24,38 +24,6 @@ dimensionality = {
 }
 
 
-def truncate_to_width(vector: Vector, width: int) -> Vector:
-    """
-    A Matryoshka embedding, narrowed by the client rather than by the server.
-
-    A model trained with Matryoshka representation learning packs its most
-    significant dimensions first, so a truncated prefix of its vector is itself
-    a usable embedding. Qwen3-Embedding is one, and that property is what makes
-    a 768-wide index of a 4,096-wide model reasonable rather than lossy
-    guesswork — a fifth of the RAM for very nearly the same retrieval.
-
-    The prefix is RENORMALISED. Truncation drops magnitude along with the
-    dimensions it removes, so the remainder is no longer a unit vector, and a
-    store comparing by dot product would then rank by how much of each vector
-    survived rather than by similarity. Cosine distance is scale-invariant and
-    would not notice; a dot-product index would, silently.
-
-    A width at or above the vector's own is returned unchanged rather than
-    refused: asking a 4,096-wide model to index at 4,096 is the identity case,
-    and a caller that has not narrowed anything must not be told it did.
-    """
-    if width >= len(vector):
-        return vector
-    prefix = vector[:width]
-    magnitude = sum(value * value for value in prefix) ** 0.5
-    # An all-zero prefix has no direction to preserve. It is not a vector any
-    # real embedder returns, and dividing by its magnitude would be a crash
-    # rather than a wrong answer, so it is returned as it is.
-    if magnitude == 0:
-        return prefix
-    return [value / magnitude for value in prefix]
-
-
 class Embedding(ABC):
     subclasses = {}
 
@@ -229,14 +197,18 @@ class HoonifyEmbedding(Embedding):
     one, because getting it wrong is not a runtime error — it is a vector store
     built at the wrong width, discovered at the first query.
 
-    `dimension_parameter` says WHO narrows the vector, and the two answers are
-    not interchangeable. True means the endpoint honours the `dimensions`
-    request parameter and is asked for the width directly. False means it does
-    not — Hoonify's Qwen3 endpoint rejects the parameter outright today — so the
-    full vector is fetched and truncated here. Both produce a vector of
-    `dimension` floats; sending the parameter to a server that has one answer is
-    a 400 on every call, and NOT truncating when the server ignored the request
-    is a 4,096-wide vector rejected by a 768-wide collection on every upsert.
+    `dimension_parameter` says whether the endpoint takes a `dimensions`
+    request parameter at all. True asks it for `dimension` directly. False sends
+    nothing and takes the width the endpoint serves — Hoonify's Qwen3 endpoint
+    rejects the parameter outright, so that is the only thing to do with it, and
+    sending one to a server that has a single answer is a 400 on every call.
+
+    Nothing narrows the vector on this side. A width the server did not serve is
+    a width this client cannot honestly produce: truncating to one would rest on
+    the model being Matryoshka-trained, and a prefix taken from a model that is
+    not is a vector of the right length carrying an arbitrary slice of the wrong
+    space — which retrieves badly and reports nothing. `dimension` must
+    therefore be the width the endpoint actually returns.
     """
 
     def __init__(
@@ -278,11 +250,6 @@ class HoonifyEmbedding(Embedding):
             input=[text] if isinstance(text, str) else text, model=self.model, **width
         )
         embeddings = [item.embedding for item in response.data]
-        # Truncation is a no-op when the server already served the width asked
-        # for, so this is unconditional rather than a second branch on the same
-        # flag — one place decides, and the other cannot disagree with it.
-        if self.dimension:
-            embeddings = [truncate_to_width(vector, self.dimension) for vector in embeddings]
         return embeddings[0] if isinstance(text, str) else embeddings
 
     def to_dict(self):
