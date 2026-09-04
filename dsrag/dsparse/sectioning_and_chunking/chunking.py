@@ -146,9 +146,14 @@ def chunk_sub_section(line_start: int, line_end: int, document_lines: List[Line]
         for i in range(line_start, line_end + 1)
     ]
 
-    # Iterate through each chunk and determine the corresponding line indices
+    # Iterate through each chunk and determine the corresponding line indices.
+    # Chunks are consecutive, so each one starts at or after the line the last
+    # one started on: the search resumes from there rather than re-walking the
+    # section from its first line, which is what made this quadratic in the
+    # number of lines and turned a multi-megabyte section into minutes of it.
     chunk_line_indices = []
     current_char = 0
+    search_from = 0
     for chunk_text in chunks_text:
         chunk_length = len(chunk_text)
         chunk_start_char = current_char
@@ -156,8 +161,9 @@ def chunk_sub_section(line_start: int, line_end: int, document_lines: List[Line]
         current_char = chunk_end_char + 1  # +1 for the newline delimiter
 
         # Map chunk to line indices
-        chunk_line_start, chunk_line_end = find_lines_in_range(chunk_start_char, chunk_end_char, line_char_ranges, line_start, line_end)
+        chunk_line_start, chunk_line_end = find_lines_in_range(chunk_start_char, chunk_end_char, line_char_ranges, line_start, line_end, search_from)
         chunk_line_indices.append((chunk_line_start, chunk_line_end))
+        search_from = max(0, chunk_line_start - line_start)
 
     # merge the last two chunks if the last chunk is too small
     if len(chunks_text) > 1:
@@ -175,7 +181,7 @@ def chunk_sub_section(line_start: int, line_end: int, document_lines: List[Line]
     return chunks_text, chunk_line_indices
 
 # Function to find lines within a given character range
-def find_lines_in_range(chunk_start: int, chunk_end: int, line_char_ranges: List[Tuple], line_start: int, line_end: int) -> Tuple[int, int]:
+def find_lines_in_range(chunk_start: int, chunk_end: int, line_char_ranges: List[Tuple], line_start: int, line_end: int, search_from: int = 0) -> Tuple[int, int]:
     """
     Inputs
     - chunk_start: Start character index of the chunk
@@ -183,6 +189,9 @@ def find_lines_in_range(chunk_start: int, chunk_end: int, line_char_ranges: List
     - line_char_ranges: List of tuples (line_idx, start_char, end_char) for each line
     - line_start: start line index for this section
     - line_end: end line index for this section
+    - search_from: index into line_char_ranges to begin at, for callers walking
+      consecutive chunks. Lines before it start earlier than every line this
+      chunk can touch, so skipping them cannot change the answer.
 
     Outputs
     - Tuple of line indices corresponding to the chunk
@@ -191,7 +200,12 @@ def find_lines_in_range(chunk_start: int, chunk_end: int, line_char_ranges: List
     chunk_line_end = None
 
     # First pass: Look for direct overlaps
-    for line_idx, start, end in line_char_ranges:
+    for line_idx, start, end in line_char_ranges[search_from:]:
+        # Every match below needs the line to begin at or before the chunk
+        # ends, and lines are ordered, so nothing after this one can match.
+        if start > chunk_end:
+            break
+
         # Check if chunk starts at or within this line
         if start <= chunk_start <= end + 1:  # +1 to include newline position
             chunk_line_start = line_idx
