@@ -192,11 +192,20 @@ def render_records(
     if title == "":
         raise ProjectionError("title template rendered empty; a document the reader cannot name is one nobody opens")
 
+    # Resolved HERE rather than at the return, because the child join
+    # dereferences the key column below and `external_id` is what validates it.
+    # Reversed, a root record that lost its key raised a bare KeyError — the one
+    # shape of drift this module promises to fail closed on.
+    doc_id = external_id(record, projection.get("key", []))
+
     builder = _Builder()
     for entry in _narrative_body(record, fields, root_narrative):
         builder.add_section(entry["title"], entry["body"])
 
     if child_projection:
+        _require_title_columns_are_used(
+            child_projection.get("fields", {}), child_projection.get("section_title_template", "")
+        )
         mine = _joined_children(children or [], child_projection, record, projection.get("key", []))
         for child in _ordered_children(mine, child_projection):
             child_fields = child_projection.get("fields", {})
@@ -230,7 +239,7 @@ def render_records(
             identifiers.append(value)
 
     return RecordDocument(
-        doc_id=external_id(record, projection.get("key", [])),
+        doc_id=doc_id,
         title=title,
         lines=builder.lines,
         sections=builder.sections,

@@ -242,6 +242,24 @@ class TestGuards(unittest.TestCase):
         with self.assertRaises(ProjectionError):
             render_records({k: v for k, v in TICKET.items() if k != "site_id"}, projection)
 
+    def test__a_child_title_role_the_section_template_never_names_is_refused(self):
+        # The same inert role as on the root, one level down.
+        child = dict(PROJECTION["child"], fields={"body": "narrative", "author": "title"},
+                     section_title_template="Comment of {created_at}")
+        projection = dict(PROJECTION, child=child)
+
+        with self.assertRaises(ProjectionError):
+            render_records(TICKET, projection, [comment("2026-03-04", "d", "Checked.")])
+
+    def test__a_root_missing_its_key_fails_closed_on_an_aggregate(self):
+        # The child join dereferences the key column, so a bare KeyError here
+        # would escape the ProjectionError contract the module promises.
+        projection = dict(PROJECTION, title_template="{subject}")
+        record = {k: v for k, v in TICKET.items() if k != "id"}
+
+        with self.assertRaises(ProjectionError):
+            render_records(record, projection, [comment("2026-03-04", "d", "Checked.")])
+
     def test__an_unknown_grain_is_refused(self):
         with self.assertRaises(ProjectionError):
             render_records(TICKET, dict(PROJECTION, grain="fact"))
