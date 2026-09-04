@@ -114,6 +114,12 @@ class _Builder:
     embedding anyway, through the AutoContext chunk header, so writing it into
     the body would embed it twice — and it would smuggle whatever the title
     names past the field roles, which is the one thing they exist to decide.
+
+    The sections PARTITION the lines: every line belongs to exactly one, and
+    they run start-to-end with no gap. A separator line between them would read
+    better as a document and belong to no section, which is text a consumer
+    mapping sections back onto source offsets cannot place — and text that is
+    part of no section is text no chunk can carry.
     """
 
     def __init__(self) -> None:
@@ -124,9 +130,6 @@ class _Builder:
         body = body.strip()
         if body == "":
             return
-
-        if self.lines:
-            self.lines.extend(str_to_lines(""))
 
         start = len(self.lines)
         self.lines.extend(str_to_lines(body))
