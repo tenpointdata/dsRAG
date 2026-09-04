@@ -81,6 +81,26 @@ class TestRecordStructure(unittest.TestCase):
             ["Comment by a, 2026-03-01", "Comment by b, 2026-03-04", "Comment by c, 2026-03-09"],
         )
 
+    def test__sections_partition_every_line_of_the_document(self):
+        # A line belonging to no section is a line no chunk can carry, and a
+        # consumer mapping sections onto source offsets cannot place it.
+        children = [comment("2026-03-0%d" % i, "dana", "Body %d" % i) for i in range(1, 4)]
+        document = render_records(TICKET, PROJECTION, children)
+
+        self.assertEqual(document["sections"][0]["start"], 0)
+        self.assertEqual(document["sections"][-1]["end"], len(document["lines"]) - 1)
+        for earlier, later in zip(document["sections"], document["sections"][1:]):
+            self.assertEqual(later["start"], earlier["end"] + 1)
+
+    def test__section_content_matches_the_lines_it_spans(self):
+        document = render_records(TICKET, PROJECTION, [comment("2026-03-04", "d", "Checked it.")])
+
+        for section in document["sections"]:
+            spanned = "\n".join(
+                line["content"] for line in document["lines"][section["start"] : section["end"] + 1]
+            )
+            self.assertEqual(section["content"], spanned)
+
     def test__section_titles_are_citation_locators(self):
         sections, _, _ = parse_and_chunk_records(TICKET, PROJECTION, [comment("2026-03-04", "dana", "Checked it.")])
 
