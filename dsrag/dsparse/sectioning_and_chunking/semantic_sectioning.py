@@ -2,6 +2,8 @@ import os
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
+
+from dsrag.utils.usage import in_context
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -851,7 +853,10 @@ def get_sections(
                         extra={**base_extra, "window_start": window_start, "window_end": window_end})
 
             future = executor.submit(
-                process_window_with_retries,
+                # A pool thread inherits no context variables, so a window
+                # sectioned here would report into no meter at all — and those
+                # are the generative calls a document makes most of.
+                in_context(process_window_with_retries),
                 window_text,
                 window_start,
                 llm_provider,

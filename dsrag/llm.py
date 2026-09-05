@@ -6,6 +6,7 @@ from dsrag.utils import hoonify
 # Gemini SDK it may never call. Every use below is inside a method, so the
 # loader resolves it at call time.
 from dsrag.utils.imports import openai, anthropic, ollama, genai
+from dsrag.utils.usage import record_response_usage
 
 
 class LLM(ABC):
@@ -54,6 +55,7 @@ class OpenAIChatAPI(LLM):
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
+        record_response_usage(response, provider="openai", model=self.model, operation="generate")
         llm_output = response.choices[0].message.content.strip()
         return llm_output
     
@@ -97,6 +99,7 @@ class AnthropicChatAPI(LLM):
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
+        record_response_usage(message, provider="anthropic", model=self.model, operation="generate")
         return message.content[0].text
     
     def to_dict(self):
@@ -127,6 +130,7 @@ class OllamaAPI(LLM):
                 "temperature": self.temperature,
             },
         )
+        record_response_usage(response, provider="ollama", model=self.model, operation="generate")
         return response["message"]["content"].strip()
 
     def to_dict(self):
@@ -227,6 +231,12 @@ class GeminiAPI(LLM):
                 contents=google_messages,
                 generation_config=generation_config,
             )
+            # Before the branches below: a blocked or empty response still
+            # spent the prompt, and only the paths that return content would
+            # have recorded it.
+            record_response_usage(
+                response, provider="gemini", model=self.model_name, operation="generate"
+            )
             # Accessing the response text using response.text is generally robust
             # Check response.prompt_feedback for safety blocks
             if response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -294,6 +304,7 @@ class HoonifyChatAPI(LLM):
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
+        record_response_usage(response, provider="hoonify", model=self.model, operation="generate")
         return response.choices[0].message.content.strip()
 
     def to_dict(self):
