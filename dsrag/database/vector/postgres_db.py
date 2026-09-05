@@ -3,6 +3,7 @@ import json
 import numpy as np
 
 from dsrag.database.vector.db import VectorDB
+from dsrag.database.vector.metadata_filter import to_sql_filter
 from dsrag.database.vector.types import VectorSearchResult, MetadataFilter, ChunkMetadata, Vector
 from dsrag.utils.imports import LazyLoader
 
@@ -11,56 +12,6 @@ psycopg2 = LazyLoader("psycopg2", "psycopg2-binary")
 pgvector = LazyLoader("pgvector")
 
 # We'll import register_vector when needed to avoid immediate import
-
-
-def format_metadata_filter(metadata_filter: MetadataFilter) -> dict:
-    """
-    Format the metadata filter to be used in the ChromaDB query method.
-
-    Args:
-        metadata_filter (dict): The metadata filter.
-
-    Returns:
-        dict: The formatted metadata filter.
-    """
-
-    field = metadata_filter['field']
-    operator = metadata_filter['operator']
-    value = metadata_filter['value']
-
-    # Map the operator to SQL syntax
-    operator_map = {
-        'equals': '=',
-        'not_equals': '!=',
-        'in': 'IN',
-        'not_in': 'NOT IN',
-        'greater_than': '>',
-        'less_than': '<',
-        'greater_than_equals': '>=',
-        'less_than_equals': '<=',
-    }
-
-    # Ensure the operator is valid
-    if operator not in operator_map:
-        raise ValueError(f"Unsupported operator: {operator}")
-
-    sql_operator = operator_map[operator]
-
-    # Handle different types of values
-    if isinstance(value, list):
-        # Convert list to a tuple for SQL IN expressions
-        value_placeholder = f"({', '.join(['%s'] * len(value))})"
-    else:
-        # Single value placeholder
-        value_placeholder = "%s"
-
-    # Construct the SQL filter expression
-    if operator in ['in', 'not_in']:
-        filter_expression = f"metadata->>'{field}' {sql_operator} {value_placeholder}"
-    else:
-        filter_expression = f"metadata->>'{field}' {sql_operator} {value_placeholder}"
-
-    return filter_expression
 
 
 class PostgresVectorDB(VectorDB):
@@ -211,7 +162,7 @@ class PostgresVectorDB(VectorDB):
         query_vector = np.array(query_vector)
 
         if metadata_filter:
-            filter_expression = format_metadata_filter(metadata_filter)
+            filter_expression = to_sql_filter(metadata_filter)
 
         from psycopg2 import sql
         if metadata_filter:

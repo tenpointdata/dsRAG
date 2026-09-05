@@ -1,35 +1,51 @@
 """
 Utilities for lazy imports of optional dependencies.
+
+This module owns the one ``LazyLoader`` implementation. ``dsparse`` re-uses it
+rather than keeping a fork — the two copies had already drifted apart in the
+install hint they print, which is the one sentence a user actually reads when a
+dependency is missing.
 """
 import importlib
+from typing import Optional
+
 
 class LazyLoader:
     """
     Lazily import a module only when its attributes are accessed.
-    
+
     This allows optional dependencies to be imported only when actually used,
     rather than at module import time.
-    
+
     Usage:
         # Instead of: import chromadb
         chromadb = LazyLoader("chromadb")
-        
+
         # Then use chromadb as normal - it will only be imported when accessed
         # If the module is not installed, a helpful error message is shown
     """
-    def __init__(self, module_name, package_name=None):
+
+    def __init__(
+        self,
+        module_name: str,
+        package_name: Optional[str] = None,
+        extra_of: str = "dsrag",
+    ):
         """
         Initialize a lazy loader for a module.
-        
+
         Args:
             module_name: The name of the module to import
             package_name: Optional package name for pip install instructions
                          (defaults to module_name if not provided)
+            extra_of: The distribution whose extras offer this dependency, named
+                      in the install hint. ``dsparse`` loads under its own name.
         """
         self._module_name = module_name
         self._package_name = package_name or module_name
+        self._extra_of = extra_of
         self._module = None
-    
+
     def __getattr__(self, name):
         """Called when an attribute is accessed."""
         if self._module is None:
@@ -40,9 +56,9 @@ class LazyLoader:
                 raise ImportError(
                     f"The '{self._module_name}' module is required but not installed. "
                     f"Please install it with: pip install {self._package_name} "
-                    f"or pip install dsrag[{self._package_name}]"
+                    f"or pip install {self._extra_of}[{self._package_name}]"
                 )
-        
+
         # Try to get the attribute from the module
         try:
             return getattr(self._module, name)
@@ -58,7 +74,8 @@ class LazyLoader:
                 # If that fails, re-raise the original AttributeError
                 raise AttributeError(
                     f"Module '{self._module_name}' has no attribute '{name}'"
-                ) 
+                )
+
 
 # Create lazy loaders for commonly used optional dependencies
 instructor = LazyLoader("instructor")

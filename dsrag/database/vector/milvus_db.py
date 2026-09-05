@@ -3,47 +3,12 @@ from typing import Optional, Sequence
 
 from dsrag.database.vector import VectorSearchResult
 from dsrag.database.vector.db import VectorDB
-from dsrag.database.vector.types import MetadataFilter, Vector, ChunkMetadata
+from dsrag.database.vector.metadata_filter import to_expression_filter
+from dsrag.database.vector.types import Vector, ChunkMetadata
 from dsrag.utils.imports import LazyLoader
 
 # Lazy load pymilvus
 pymilvus = LazyLoader("pymilvus")
-
-def _convert_metadata_to_expr(metadata_filter: MetadataFilter) -> str:
-    """
-    Convert the metadata filter to the expression used in the Milvus query method.
-
-    Args:
-        metadata_filter (dict): The metadata filter.
-
-    Returns:
-        str: The formatted expression.
-    """
-
-    if not metadata_filter:
-        return ""
-    field = metadata_filter["field"]
-    operator = metadata_filter["operator"]
-    value = metadata_filter["value"]
-
-    operator_mapping = {
-        "equals": "==",
-        "not_equals": "!=",
-        "in": "in",
-        "not_in": "not in",
-        "greater_than": ">",
-        "less_than": "<",
-        "greater_than_equals": ">=",
-        "less_than_equals": "<=",
-    }
-
-    formatted_operator = operator_mapping[operator]
-    if isinstance(value, str):
-        value = f'"{value}"'
-    formatted_metadata_filter = f"metadata['{field}'] {formatted_operator} {value}"
-
-    return formatted_metadata_filter
-
 
 class MilvusDB(VectorDB):
     def __init__(self, kb_id: str, storage_directory: str = '~/dsRAG',
@@ -126,7 +91,7 @@ class MilvusDB(VectorDB):
         query_results = self.client.search(
             collection_name=self.kb_id,
             data=[query_vector],
-            filter=_convert_metadata_to_expr(metadata_filter),
+            filter=to_expression_filter(metadata_filter),
             limit=top_k,
             output_fields=["*"]
         )[0]

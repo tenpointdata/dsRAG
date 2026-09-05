@@ -5,34 +5,15 @@ import json
 from abc import ABC, abstractmethod
 from typing import List, Optional
 from datetime import datetime
+from dsrag.utils.registry import SerializableComponent
 
 
-class FileSystem(ABC):
-    subclasses = {}
-
+class FileSystem(SerializableComponent, ABC):
     def __init__(self, base_path: str):
         self.base_path = base_path
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        cls.subclasses[cls.__name__] = cls
-
     def to_dict(self):
-        return {
-            "subclass_name": self.__class__.__name__,
-            "base_path": self.base_path
-        }
-
-    @classmethod
-    def from_dict(cls, config):
-        subclass_name = config.pop(
-            "subclass_name", None
-        )  # Remove subclass_name from config
-        subclass = cls.subclasses.get(subclass_name)
-        if subclass:
-            return subclass(**config)  # Pass the modified config without subclass_name
-        else:
-            raise ValueError(f"Unknown subclass: {subclass_name}")
+        return {**super().to_dict(), "base_path": self.base_path}
 
     @abstractmethod
     def create_directory(self, kb_id: str, doc_id: str) -> None:

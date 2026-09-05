@@ -1,60 +1,32 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional
 import os
 
+from dsrag.utils.registry import SerializableComponent
 from ..utils.imports import genai_new, vertexai  # lazy loaders
 
 
-class VLM(ABC):
+class VLM(SerializableComponent, ABC):
     """Abstract base class for Visual Language Model clients.
 
     Subclasses should implement the make_llm_call method to perform the actual
     provider-specific API call and return the response text.
 
-    Subclass registration
-    ---------------------
-    Each subclass is automatically registered by class name using
-    __init_subclass__. This allows simple construction from a configuration
-    dictionary via from_dict.
+    Registration and from_dict construction come from SerializableComponent,
+    the same base every other pluggable family uses.
     """
 
-    # Registry of subclass name -> subclass type
-    _subclasses: Dict[str, Type["VLM"]] = {}
-
-    def __init_subclass__(cls, **kwargs):  # type: ignore[override]
-        super().__init_subclass__(**kwargs)
-        # Register subclass by its class name for from_dict factory construction
-        VLM._subclasses[cls.__name__] = cls
-
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize this VLM instance to a dictionary.
-
-        Returns a dict containing the subclass name and public fields
-        required to reconstruct the instance with from_dict.
         """
-        # Default implementation serializes __dict__ (public fields) plus subclass name
+        Serialize this VLM instance to a dictionary.
+
+        A VLM's constructor arguments are exactly its public fields, so the
+        whole set is written rather than named one by one in each subclass.
+        """
         data = {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
-        data["subclass_name"] = self.__class__.__name__
-        return data
-
-    @classmethod
-    def from_dict(cls, config: Dict[str, Any]) -> "VLM":
-        """Construct a VLM instance from a serialized config dictionary.
-
-        The config must contain a "subclass_name" key identifying the
-        registered subclass. Remaining keys are forwarded to the subclass
-        constructor as keyword arguments.
-        """
-        subclass_name = config.get("subclass_name")
-        if not subclass_name:
-            raise ValueError("config must include 'subclass_name'")
-        subclass = cls._subclasses.get(subclass_name)
-        if subclass is None:
-            raise ValueError(f"Unknown VLM subclass: {subclass_name}")
-        kwargs = {k: v for k, v in config.items() if k != "subclass_name"}
-        return subclass(**kwargs)  # type: ignore[arg-type]
+        return {**super().to_dict(), **data}
 
     @abstractmethod
     def make_llm_call(
@@ -223,3 +195,7 @@ class VertexAIVLM(VLM):
             generation_config=generation_config,
         )
         return response.text
+
+
+# The registry's pre-SerializableComponent name, kept for callers that used it.
+VLM._subclasses = VLM.subclasses

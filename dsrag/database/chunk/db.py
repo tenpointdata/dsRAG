@@ -2,30 +2,10 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 from dsrag.database.chunk.types import FormattedDocument
+from dsrag.utils.registry import SerializableComponent
 
 
-class ChunkDB(ABC):
-    subclasses = {}
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        cls.subclasses[cls.__name__] = cls
-
-    def to_dict(self):
-        return {
-            "subclass_name": self.__class__.__name__,
-        }
-
-    @classmethod
-    def from_dict(cls, config) -> "ChunkDB":
-        subclass_name = config.pop(
-            "subclass_name", None
-        )  # Remove subclass_name from config
-        subclass = cls.subclasses.get(subclass_name)
-        if subclass:
-            return subclass(**config)  # Pass the modified config without subclass_name
-        else:
-            raise ValueError(f"Unknown subclass: {subclass_name}")
+class ChunkDB(SerializableComponent, ABC):
 
     @abstractmethod
     def add_document(self, doc_id: str, chunks: dict[int, dict[str, Any]], supp_id: str = "", metadata: dict = {}) -> None:

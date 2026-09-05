@@ -99,3 +99,12 @@ all = [
 where = ["."]
 include = ["dsrag", "dsrag.*"]
 exclude = ["dsrag.dsparse.tests", "dsrag.dsparse.tests.*", "dsrag.dsparse.dist", "dsrag.dsparse.dist.*"]
+
+[tool.pytest.ini_options]
+# `tests/unit` and `dsrag/dsparse/tests/unit` both hold a `test_chunking.py` and
+# a `test_file_system.py`. Under pytest's default prepend import mode the second
+# one collected shadows the first and collection fails outright, which is why
+# CI ran the two trees as separate commands. importlib mode imports each by its
+# full path, so `pytest` runs the whole suite in one invocation.
+addopts = "--import-mode=importlib"
+testpaths = ["tests/unit", "tests/integration", "dsrag/dsparse/tests"]
