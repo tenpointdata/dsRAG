@@ -215,6 +215,23 @@ The currently available options are:
 - `OllamaChatAPI`
 - `GeminiAPI`
 
+#### Token usage
+Every LLM and embedding call reports what the provider said it spent, so the cost of a unit of work can be measured rather than estimated. Wrap the work you want a total for:
+
+```python
+from dsrag.utils.usage import collect_usage
+
+with collect_usage() as meter:
+    kb.add_document(doc_id="report", text=text)
+
+for total in meter.totals():
+    print(total.provider, total.model, total.operation, total.calls, total.input_tokens, total.output_tokens)
+```
+
+Totals are grouped by provider, model and operation (`generate`, `embed`, `rerank`), and are collected across worker threads, so the section summaries and semantic sectioning windows a document generates in parallel are included. Collecting is opt-in: with no active meter, recording is a dictionary lookup.
+
+A provider that returns no token counts still has its calls counted, with zero tokens — `calls > 0` alongside zero tokens means "this ran and nobody counted it", which is more useful than an estimate that cannot be reconciled against a bill.
+
 #### FileSystem
 This defines the file system to be used for saving PDF images for VLM file parsing.
 

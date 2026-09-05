@@ -4,6 +4,7 @@ from typing import Optional
 from dsrag.database.vector.types import Vector
 from dsrag.utils import hoonify
 from dsrag.utils.imports import openai, cohere, voyageai, ollama
+from dsrag.utils.usage import record_response_usage, record_usage
 
 
 dimensionality = {
@@ -70,6 +71,7 @@ class OpenAIEmbedding(Embedding):
         response = self.client.embeddings.create(
             input=text, model=self.model, dimensions=self.dimension
         )
+        record_response_usage(response, provider="openai", model=self.model, operation="embed")
         embeddings = [embedding_item.embedding for embedding_item in response.data]
         return embeddings[0] if isinstance(text, str) else embeddings
 
@@ -111,6 +113,16 @@ class CohereEmbedding(Embedding):
             input_type=input_type,
             model=self.model,
         )
+        # Cohere reports the charge under `meta.billed_units` rather than
+        # `usage`, and an SDK version that stops carrying it must not break a
+        # working embed call.
+        billed = getattr(getattr(response, "meta", None), "billed_units", None)
+        record_usage(
+            provider="cohere",
+            model=self.model,
+            operation="embed",
+            input_tokens=getattr(billed, "input_tokens", 0) or 0,
+        )
         return response.embeddings[0] if isinstance(text, str) else response.embeddings
 
     def to_dict(self):
@@ -141,6 +153,12 @@ class VoyageAIEmbedding(Embedding):
             texts=[text] if isinstance(text, str) else text,
             model=self.model,
             input_type=input_type,
+        )
+        record_usage(
+            provider="voyageai",
+            model=self.model,
+            operation="embed",
+            input_tokens=getattr(response, "total_tokens", 0) or 0,
         )
         return response.embeddings[0] if isinstance(text, str) else response.embeddings
 
@@ -178,10 +196,16 @@ class OllamaEmbedding(Embedding):
             responses = []
             for text in text:
                 response = self.client.embeddings(model=self.model, prompt=text)
+                record_response_usage(
+                    response, provider="ollama", model=self.model, operation="embed"
+                )
                 responses.append(response["embedding"])
             return responses
         else:
             response = self.client.embeddings(model=self.model, prompt=text)
+            record_response_usage(
+                response, provider="ollama", model=self.model, operation="embed"
+            )
             return response["embedding"]
 
     def to_dict(self):
@@ -249,6 +273,7 @@ class HoonifyEmbedding(Embedding):
         response = self.client.embeddings.create(
             input=[text] if isinstance(text, str) else text, model=self.model, **width
         )
+        record_response_usage(response, provider="hoonify", model=self.model, operation="embed")
         embeddings = [item.embedding for item in response.data]
         return embeddings[0] if isinstance(text, str) else embeddings
 

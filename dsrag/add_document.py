@@ -13,6 +13,8 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from dsrag.utils.usage import in_context
+
 def process_section_summary(section, auto_context_model, document_title, auto_context_config, language, base_extra, i):
     ingestion_logger = logging.getLogger("dsrag.ingestion")
     if auto_context_config.get("get_section_summaries", False):
@@ -83,7 +85,10 @@ def auto_context(kb_id: str, auto_context_model: LLM, sections, chunks, text, do
         with ThreadPoolExecutor(max_workers=min(max_concurrent_workers, len(sections))) as executor:
             future_to_section = {
                 executor.submit(
-                    process_section_summary, 
+                    # Per submission, so each worker gets its own copy: a pool
+                    # thread inherits no context variables, and the meter
+                    # collecting this document's usage is one of them.
+                    in_context(process_section_summary),
                     section, 
                     auto_context_model, 
                     document_title, 
