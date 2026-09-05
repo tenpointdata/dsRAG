@@ -1,6 +1,7 @@
+import math
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import NamedTuple, Optional
 from dsrag.database.vector.types import Vector
 from dsrag.utils import hoonify
 from dsrag.utils.imports import openai, cohere, voyageai, ollama
@@ -25,7 +26,27 @@ dimensionality = {
     "Qwen/Qwen3-Embedding-8B": 4096,
 }
 
+class MatryoshkaWidths(NamedTuple):
+    """The range a Matryoshka-trained model's own card says it supports."""
 
+    native: int
+    minimum: int
+
+
+#: Models trained so that a PREFIX of the output vector is itself a usable
+#: embedding, with the widths each one's card declares.
+#:
+#: This table is the licence to narrow a vector on the client side, and it is
+#: deliberately short. A prefix of a model that was not trained for one is a
+#: vector of the right length carrying an arbitrary slice of the wrong space:
+#: it retrieves badly and reports nothing at all, which is why truncation is
+#: refused for anything absent here rather than merely discouraged. Add a model
+#: on its card's own word, never on the shape of its output.
+MATRYOSHKA_MODELS = {
+    # Qwen3-Embedding is MRL-trained with user-defined output dimensions from
+    # 32 up to the native width — see the model card and technical report.
+    "Qwen/Qwen3-Embedding-8B": MatryoshkaWidths(native=4096, minimum=32),
+}
 class Embedding(SerializableComponent, ABC):
     def __init__(self, dimension: Optional[int] = None):
         self.dimension = dimension
@@ -211,12 +232,18 @@ class HoonifyEmbedding(Embedding):
     rejects the parameter outright, so that is the only thing to do with it, and
     sending one to a server that has a single answer is a 400 on every call.
 
-    Nothing narrows the vector on this side. A width the server did not serve is
-    a width this client cannot honestly produce: truncating to one would rest on
-    the model being Matryoshka-trained, and a prefix taken from a model that is
-    not is a vector of the right length carrying an arbitrary slice of the wrong
-    space — which retrieves badly and reports nothing. `dimension` must
-    therefore be the width the endpoint actually returns.
+    `truncate_to` narrows the served vector on this side, and is the only thing
+    that does. It is refused for any model not in `MATRYOSHKA_MODELS`, because a
+    prefix taken from a model that was not trained for one is a vector of the
+    right length carrying an arbitrary slice of the wrong space — which
+    retrieves badly and reports nothing at all. That failure is why nothing
+    narrowed here before; naming the models that support it is what makes the
+    operation safe rather than merely available. Truncation is followed by
+    renormalisation: the served vectors are unit length, a prefix of one is not,
+    and cosine similarity over vectors of mixed norm ranks by length.
+
+    `dimension` is always the width this embedder PRODUCES, so it stays the
+    width to build the vector store at whether or not truncation is on.
     """
 
     def __init__(
@@ -226,10 +253,12 @@ class HoonifyEmbedding(Embedding):
         dimension_parameter: bool = False,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        truncate_to: Optional[int] = None,
     ):
         super().__init__(dimension)
         self.model = model
         self.dimension_parameter = dimension_parameter
+        self.truncate_to = truncate_to
         self.base_url = base_url
         # `base_url` and `api_key` default to the environment. Passing them
         # explicitly is what lets one caller drive two endpoints in the same
@@ -239,15 +268,58 @@ class HoonifyEmbedding(Embedding):
             base_url=base_url or hoonify.base_url(),
         )
 
-        if dimension is None:
-            try:
-                self.dimension = dimensionality[model]
-            except KeyError:
-                raise ValueError(
-                    f"Dimension for model {model} is unknown. Please provide the dimension manually."
-                )
+        served = dimensionality.get(model)
+        if truncate_to is None:
+            if dimension is None:
+                if served is None:
+                    raise ValueError(
+                        f"Dimension for model {model} is unknown. Please provide the dimension manually."
+                    )
+                self.dimension = served
+            else:
+                self.dimension = dimension
         else:
-            self.dimension = dimension
+            # Refused at construction, not at the first query: a store built at
+            # a width whose vectors mean nothing is discovered a corpus later.
+            supported = MATRYOSHKA_MODELS.get(model)
+            if supported is None:
+                raise ValueError(
+                    f"{model} is not declared Matryoshka-trained, so a {truncate_to}-dimension "
+                    f"prefix of its output is an arbitrary slice of the wrong space — a vector of "
+                    f"the right length that retrieves badly and reports nothing. Add it to "
+                    f"MATRYOSHKA_MODELS only on the model card's own word."
+                )
+            if truncate_to < supported.minimum or truncate_to > supported.native:
+                raise ValueError(
+                    f"{model} supports {supported.minimum}–{supported.native} dimensions; "
+                    f"truncate_to={truncate_to} is outside that."
+                )
+            if dimension is not None and dimension != truncate_to:
+                raise ValueError(
+                    f"dimension={dimension} contradicts truncate_to={truncate_to}. `dimension` is "
+                    f"the width this embedder produces, which truncation decides."
+                )
+            self.dimension = truncate_to
+
+    def _narrowed(self, vector: list) -> list:
+        """
+        A Matryoshka prefix, renormalised.
+
+        Both halves are required. The prefix is only meaningful because the
+        model was trained so that one is; the renormalisation is required
+        because the served vector is unit length and a prefix of it is shorter,
+        and cosine similarity over vectors of mixed norm ranks by length rather
+        than by meaning.
+        """
+        if self.truncate_to is None:
+            return vector
+        prefix = vector[: self.truncate_to]
+        norm = math.sqrt(math.fsum(value * value for value in prefix))
+        # A zero vector has no direction to preserve; scaling it would divide by
+        # zero to produce one that is still zero.
+        if norm == 0:
+            return prefix
+        return [value / norm for value in prefix]
 
     def get_embeddings(self, text: list[str], input_type: Optional[str] = None) -> list[Vector]:
         # The parameter goes on the wire only where the endpoint takes it.
@@ -258,7 +330,7 @@ class HoonifyEmbedding(Embedding):
             input=[text] if isinstance(text, str) else text, model=self.model, **width
         )
         record_response_usage(response, provider="hoonify", model=self.model, operation="embed")
-        embeddings = [item.embedding for item in response.data]
+        embeddings = [self._narrowed(item.embedding) for item in response.data]
         return embeddings[0] if isinstance(text, str) else embeddings
 
     def to_dict(self):
@@ -269,5 +341,8 @@ class HoonifyEmbedding(Embedding):
             "model": self.model,
             "dimension_parameter": self.dimension_parameter,
             "base_url": self.base_url,
+            # A config that lost this would rebuild an embedder producing full-
+            # width vectors against a store built at the narrowed width.
+            "truncate_to": self.truncate_to,
         })
         return base_dict
