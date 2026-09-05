@@ -1,30 +1,10 @@
 from abc import ABC, abstractmethod
 from typing import Sequence, Optional
 from dsrag.database.vector.types import ChunkMetadata, Vector, VectorSearchResult
+from dsrag.utils.registry import SerializableComponent
 
 
-class VectorDB(ABC):
-    subclasses = {}
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        cls.subclasses[cls.__name__] = cls
-
-    def to_dict(self):
-        return {
-            "subclass_name": self.__class__.__name__,
-        }
-
-    @classmethod
-    def from_dict(cls, config):
-        subclass_name = config.pop(
-            "subclass_name", None
-        )  # Remove subclass_name from config
-        subclass = cls.subclasses.get(subclass_name)
-        if subclass:
-            return subclass(**config)  # Pass the modified config without subclass_name
-        else:
-            raise ValueError(f"Unknown subclass: {subclass_name}")
+class VectorDB(SerializableComponent, ABC):
 
     @abstractmethod
     def add_vectors(

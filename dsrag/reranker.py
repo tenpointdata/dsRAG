@@ -16,28 +16,10 @@ from dsrag.utils.imports import (
     sentence_transformers,
     huggingface_hub,
 )
+from dsrag.utils.registry import SerializableComponent
 
 
-class Reranker(ABC):
-    subclasses = {}
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        cls.subclasses[cls.__name__] = cls
-
-    def to_dict(self):
-        return {
-            'subclass_name': self.__class__.__name__,
-        }
-
-    @classmethod
-    def from_dict(cls, config):
-        subclass_name = config.pop('subclass_name', None)  # Remove subclass_name from config
-        subclass = cls.subclasses.get(subclass_name)
-        if subclass:
-            return subclass(**config)  # Pass the modified config without subclass_name
-        else:
-            raise ValueError(f"Unknown subclass: {subclass_name}")
+class Reranker(SerializableComponent, ABC):
 
     @abstractmethod
     def rerank_search_results(self, query: str, search_results: list) -> list:
