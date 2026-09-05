@@ -1,6 +1,11 @@
-from typing import Optional, Union, Literal
+from typing import Optional
 from typing_extensions import TypedDict
 from pydantic import BaseModel
+
+# One definition of a metadata filter, shared with the vector stores that
+# have to execute it. Re-exported here so `chat` callers keep importing it
+# from the module they already use.
+from dsrag.database.vector.types import MetadataFilter
 
 class ChatThreadParams(TypedDict):
     kb_ids: Optional[list[str]]
@@ -16,11 +21,6 @@ class ChatThreadParams(TypedDict):
 class ChatResponseOutput(TypedDict):
     response: str
     metadata: dict
-
-class MetadataFilter(TypedDict):
-    field: str
-    operator: Literal['equals', 'not_equals', 'in', 'not_in', 'greater_than', 'less_than', 'greater_than_equals', 'less_than_equals']
-    value: Union[str, int, float, list[str], list[int], list[float]]
 
 class ChatResponseInput(BaseModel):
     user_input: str

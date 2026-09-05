@@ -6,6 +6,7 @@ from dsrag.database.vector.types import Vector
 from dsrag.utils import hoonify
 from dsrag.utils.imports import openai, cohere, voyageai, ollama
 from dsrag.utils.usage import record_response_usage, record_usage
+from dsrag.utils.registry import SerializableComponent
 
 
 dimensionality = {
@@ -24,7 +25,6 @@ dimensionality = {
     "bge-large-en-v1.5": 1024,
     "Qwen/Qwen3-Embedding-8B": 4096,
 }
-
 
 class MatryoshkaWidths(NamedTuple):
     """The range a Matryoshka-trained model's own card says it supports."""
@@ -47,31 +47,12 @@ MATRYOSHKA_MODELS = {
     # 32 up to the native width — see the model card and technical report.
     "Qwen/Qwen3-Embedding-8B": MatryoshkaWidths(native=4096, minimum=32),
 }
-
-
-class Embedding(ABC):
-    subclasses = {}
-
+class Embedding(SerializableComponent, ABC):
     def __init__(self, dimension: Optional[int] = None):
         self.dimension = dimension
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        cls.subclasses[cls.__name__] = cls
-
     def to_dict(self):
-        return {"subclass_name": self.__class__.__name__, "dimension": self.dimension}
-
-    @classmethod
-    def from_dict(cls, config) -> "Embedding":
-        subclass_name = config.pop(
-            "subclass_name", None
-        )  # Remove subclass_name from config
-        subclass = cls.subclasses.get(subclass_name)
-        if subclass:
-            return subclass(**config)  # Pass the modified config without subclass_name
-        else:
-            raise ValueError(f"Unknown subclass: {subclass_name}")
+        return {**super().to_dict(), "dimension": self.dimension}
 
     @abstractmethod
     def get_embeddings(self, text: list[str], input_type: Optional[str]) -> list[Vector]:

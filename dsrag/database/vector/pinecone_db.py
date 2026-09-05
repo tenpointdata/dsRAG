@@ -1,4 +1,5 @@
 from dsrag.database.vector.db import VectorDB
+from dsrag.database.vector.metadata_filter import to_mongo_style_filter
 from dsrag.database.vector.types import VectorSearchResult, MetadataFilter
 from typing import Optional
 import os
@@ -7,33 +8,6 @@ from dsrag.utils.imports import LazyLoader
 
 # Lazy load pinecone
 pinecone = LazyLoader("pinecone")
-
-
-def format_metadata_filter(metadata_filter: MetadataFilter) -> dict:
-
-    field = metadata_filter["field"]
-    operator = metadata_filter["operator"]
-    value = metadata_filter["value"]
-
-    operator_mapping = {
-        "equals": "$eq",
-        "not_equals": "$ne",
-        "in": "$in",
-        "not_in": "$nin",
-        "greater_than": "$gt",
-        "less_than": "$lt",
-        "greater_than_equals": "$gte",
-        "less_than_equals": "$lte",
-    }
-    formatted_operator = operator_mapping.get(operator)
-
-    if formatted_operator == "$eq":
-        formatted_metadata_filter = {field: value}
-    else:
-        formatted_metadata_filter = {field: {formatted_operator: value}}
-    
-    return formatted_metadata_filter
-
 
 
 class PineconeDB(VectorDB):
@@ -131,10 +105,10 @@ class PineconeDB(VectorDB):
             query_vector = query_vector.tolist()
         if metadata_filter:
             if self.namespace is not None:
-                formatted_metadata_filter = format_metadata_filter(metadata_filter)
+                formatted_metadata_filter = to_mongo_style_filter(metadata_filter, bare_equality=True)
                 search_results = index.query(vector=query_vector, top_k=top_k, include_metadata=True, filter=formatted_metadata_filter, namespace=self.namespace)
             else:
-                formatted_metadata_filter = format_metadata_filter(metadata_filter)
+                formatted_metadata_filter = to_mongo_style_filter(metadata_filter, bare_equality=True)
                 search_results = index.query(vector=query_vector, top_k=top_k, include_metadata=True, filter=formatted_metadata_filter)
         else:
             if self.namespace is not None:

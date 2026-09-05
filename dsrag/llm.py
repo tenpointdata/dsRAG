@@ -7,28 +7,10 @@ from dsrag.utils import hoonify
 # loader resolves it at call time.
 from dsrag.utils.imports import openai, anthropic, ollama, genai
 from dsrag.utils.usage import record_response_usage
+from dsrag.utils.registry import SerializableComponent
 
 
-class LLM(ABC):
-    subclasses = {}
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        cls.subclasses[cls.__name__] = cls
-
-    def to_dict(self):
-        return {
-            'subclass_name': self.__class__.__name__,
-        }
-
-    @classmethod
-    def from_dict(cls, config):
-        subclass_name = config.pop('subclass_name', None)  # Remove subclass_name from config
-        subclass = cls.subclasses.get(subclass_name)
-        if subclass:
-            return subclass(**config)  # Pass the modified config without subclass_name
-        else:
-            raise ValueError(f"Unknown subclass: {subclass_name}")
+class LLM(SerializableComponent, ABC):
 
     @abstractmethod
     def make_llm_call(self, chat_messages: list[dict]) -> str:

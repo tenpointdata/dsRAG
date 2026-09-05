@@ -1,4 +1,4 @@
-from typing import Optional, Sequence, Union
+from typing import Literal, Optional, Sequence, Union
 from typing_extensions import TypedDict
 
 
@@ -18,7 +18,22 @@ class VectorSearchResult(TypedDict):
     metadata: ChunkMetadata
     similarity: float
 
+
+MetadataFilterOperator = Literal[
+    "equals",
+    "not_equals",
+    "in",
+    "not_in",
+    "greater_than",
+    "less_than",
+    "greater_than_equals",
+    "less_than_equals",
+]
+
+MetadataFilterValue = Union[str, int, float, list[str], list[int], list[float]]
+
+
 class MetadataFilter(TypedDict):
     field: str
-    operator: str # Can be one of the following: 'equals', 'not_equals', 'in', 'not_in', 'greater_than', 'less_than', 'greater_than_equals', 'less_than_equals'
-    value: Union[str, int, float, list[str], list[int], list[float]]
+    operator: MetadataFilterOperator
+    value: MetadataFilterValue
