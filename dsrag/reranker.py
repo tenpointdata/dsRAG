@@ -1,3 +1,4 @@
+from dsrag.utils.usage import record_response, record_usage
 from abc import ABC, abstractmethod
 import math
 import os
@@ -69,6 +70,7 @@ class CohereReranker(Reranker):
             documents.append(f"{result['metadata']['chunk_header']}\n\n{result['metadata']['chunk_text']}")
 
         reranked_results = self.client.rerank(model=self.model, query=query, documents=documents)
+        record_usage("cohere", self.model, "rerank")
         results = reranked_results.results
         reranked_indices = [result.index for result in results]
         reranked_similarity_scores = [result.relevance_score for result in results]
@@ -107,6 +109,8 @@ class VoyageReranker(Reranker):
             documents.append(f"{result['metadata']['chunk_header']}\n\n{result['metadata']['chunk_text']}")
         
         reranked_results = self.client.rerank(model=self.model, query=query, documents=documents)
+        record_response("voyage", self.model, "rerank", reranked_results,
+                        usage_field=None, input_field="total_tokens")
         results = reranked_results.results
         reranked_indices = [result.index for result in results]
         reranked_similarity_scores = [result.relevance_score for result in results]
@@ -418,6 +422,7 @@ class OnDeviceReranker(Reranker):
             for result in search_results
         ]
         scores = self.score_pairs(pairs)
+        record_usage("ondevice", self.model, "rerank")
 
         order = sorted(range(len(search_results)), key=lambda i: scores[i], reverse=True)
         reranked_search_results = [search_results[i] for i in order]
@@ -501,7 +506,9 @@ class HoonifyReranker(Reranker):
             timeout=self.timeout,
         )
         response.raise_for_status()
-        results = response.json()["results"]
+        payload = response.json()
+        record_response("hoonify", self.model, "rerank", payload)
+        results = payload["results"]
 
         reranked_search_results = [search_results[r["index"]] for r in results]
         for i, result in enumerate(reranked_search_results):

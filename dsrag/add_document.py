@@ -11,7 +11,8 @@ from dsrag.database.vector import VectorDB
 from dsrag.custom_term_mapping import annotate_chunks
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from dsrag.utils.usage import UsageThreadPoolExecutor as ThreadPoolExecutor
+from concurrent.futures import as_completed
 
 def process_section_summary(section, auto_context_model, document_title, auto_context_config, language, base_extra, i):
     ingestion_logger = logging.getLogger("dsrag.ingestion")

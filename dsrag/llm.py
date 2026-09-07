@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import os
 from dsrag.utils import hoonify
+from dsrag.utils.usage import record_response
 # `genai` is the LazyLoader, not the module: importing google.generativeai
 # eagerly made every consumer of this file — the sidecar included — install a
 # Gemini SDK it may never call. Every use below is inside a method, so the
@@ -54,6 +55,7 @@ class OpenAIChatAPI(LLM):
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
+        record_response("openai", self.model, "generate", response)
         llm_output = response.choices[0].message.content.strip()
         return llm_output
     
@@ -97,6 +99,8 @@ class AnthropicChatAPI(LLM):
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
+        record_response("anthropic", self.model, "generate", message,
+                        input_field="input_tokens", output_field="output_tokens")
         return message.content[0].text
     
     def to_dict(self):
@@ -127,6 +131,8 @@ class OllamaAPI(LLM):
                 "temperature": self.temperature,
             },
         )
+        record_response("ollama", self.model, "generate", response, usage_field=None,
+                        input_field="prompt_eval_count", output_field="eval_count")
         return response["message"]["content"].strip()
 
     def to_dict(self):
@@ -227,6 +233,9 @@ class GeminiAPI(LLM):
                 contents=google_messages,
                 generation_config=generation_config,
             )
+            record_response("gemini", self.model_name, "generate", response,
+                            usage_field="usage_metadata", input_field="prompt_token_count",
+                            output_field="candidates_token_count")
             # Accessing the response text using response.text is generally robust
             # Check response.prompt_feedback for safety blocks
             if response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -294,6 +303,7 @@ class HoonifyChatAPI(LLM):
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
+        record_response("hoonify", self.model, "generate", response)
         return response.choices[0].message.content.strip()
 
     def to_dict(self):

@@ -1,7 +1,7 @@
 import os
 import time
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from dsrag.utils.usage import UsageThreadPoolExecutor as ThreadPoolExecutor
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Tuple, Optional
 

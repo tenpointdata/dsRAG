@@ -1,3 +1,4 @@
+from dsrag.utils.usage import UsageThreadPoolExecutor
 import numpy as np
 import os
 import time
@@ -703,7 +704,7 @@ class KnowledgeBase:
                 return None
 
         # Process documents in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with UsageThreadPoolExecutor(max_workers=max_workers) as executor:
             # Create futures
             future_to_doc = {
                 executor.submit(process_document, doc): doc 
@@ -801,7 +802,7 @@ class KnowledgeBase:
 
         Internal method for parallel query execution.
         """
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with UsageThreadPoolExecutor() as executor:
             futures = [executor.submit(self._search, query, 200, metadata_filter) for query in search_queries]
             all_ranked_results = []
             for future in futures:

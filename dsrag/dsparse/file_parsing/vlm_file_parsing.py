@@ -1,3 +1,4 @@
+from dsrag.utils.usage import UsageThreadPoolExecutor
 from .vlm import make_llm_call_gemini, make_llm_call_vertex
 from ..models.types import ElementType, Element, VLMConfig
 from .file_system import FileSystem
@@ -126,7 +127,7 @@ def pdf_to_images(pdf_path: str, kb_id: str, doc_id: str, file_system: FileSyste
                                  first_page=i, last_page=last_page)
         
         # Save batch of images in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with UsageThreadPoolExecutor(max_workers=max_workers) as executor:
             batch_paths = list(executor.map(save_single_image, enumerate(images, start=i-1)))
             all_image_paths.extend(batch_paths)
         
@@ -365,7 +366,7 @@ def parse_file(pdf_path: str, kb_id: str, doc_id: str, vlm_config: VLMConfig, fi
     logger.debug(f"Starting VLM page processing with up to {vlm_max_concurrent_requests} concurrent requests", extra=base_extra)
     
     # Use ThreadPoolExecutor to process pages in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=vlm_max_concurrent_requests) as executor:
+    with UsageThreadPoolExecutor(max_workers=vlm_max_concurrent_requests) as executor:
         futures = {
             executor.submit(
                 parse_page, 
