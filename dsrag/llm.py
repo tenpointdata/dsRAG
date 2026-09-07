@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import os
 from dsrag.utils import hoonify
-from dsrag.utils.usage import record_response
+from dsrag.utils.usage import metered_call, record_response
 # `genai` is the LazyLoader, not the module: importing google.generativeai
 # eagerly made every consumer of this file — the sidecar included — install a
 # Gemini SDK it may never call. Every use below is inside a method, so the
@@ -297,13 +297,14 @@ class HoonifyChatAPI(LLM):
             api_key=self.api_key or hoonify.api_key(),
             base_url=self.base_url or hoonify.base_url(),
         )
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=chat_messages,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-        )
-        record_response("hoonify", self.model, "generate", response)
+        with metered_call("hoonify", self.model, "generate") as report:
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=chat_messages,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+            report(response)
         return response.choices[0].message.content.strip()
 
     def to_dict(self):

@@ -78,7 +78,7 @@ hoonify = ["dsrag[openai]"]
 # On-device reranking. `ondevice` is the appliance path: CPU, quantized, and no
 # torch anywhere in the tree. `sentence-transformers` is the alternative for a
 # machine that already has torch and would rather not manage an ONNX export.
-ondevice = ["onnxruntime>=1.17.0", "tokenizers>=0.15.0", "huggingface-hub>=0.20.0"]
+ondevice = ["onnxruntime>=1.17.0", "tokenizers>=0.15.0", "huggingface-hub>=0.20.0", "safetensors>=0.4.3"]
 sentence-transformers = ["sentence-transformers>=3.0.0"]
 
 # Convenience groups

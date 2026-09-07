@@ -100,7 +100,7 @@ class TestOnDeviceReranker(unittest.TestCase):
         ), mock.patch(
             "dsrag.reranker.onnxruntime.InferenceSession"
         ), mock.patch(
-            "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock()
+            "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock(token_to_id=mock.Mock(return_value=0))
         ):
             reranker._load_onnx()
 
@@ -158,7 +158,7 @@ class TestOnDeviceReranker(unittest.TestCase):
             ) as download, mock.patch(
                 "dsrag.reranker.onnxruntime.InferenceSession"
             ), mock.patch(
-                "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock()
+                "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock(token_to_id=mock.Mock(return_value=0))
             ):
                 reranker._load_onnx()
 
@@ -176,7 +176,7 @@ class TestOnDeviceReranker(unittest.TestCase):
             ) as download, mock.patch(
                 "dsrag.reranker.onnxruntime.InferenceSession"
             ), mock.patch(
-                "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock()
+                "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock(token_to_id=mock.Mock(return_value=0))
             ):
                 reranker._load_onnx()
 
@@ -185,11 +185,13 @@ class TestOnDeviceReranker(unittest.TestCase):
     def test_warm_loads_the_selected_runtime_once(self):
         reranker = OnDeviceReranker(model="local", backend="onnx")
         reranker._load_onnx = mock.Mock()
+        reranker._score_onnx = mock.Mock(return_value=[0.0])
 
         reranker.warm()
         reranker.warm()
 
         reranker._load_onnx.assert_called_once_with()
+        reranker._score_onnx.assert_called_once()
         self.assertEqual(reranker._resolved_backend, "onnx")
 
     def test_save_and_load_from_dict(self):

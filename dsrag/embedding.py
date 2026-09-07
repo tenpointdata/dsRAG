@@ -1,4 +1,4 @@
-from dsrag.utils.usage import field, record_response, record_usage
+from dsrag.utils.usage import field, metered_call, record_response, record_usage
 import os
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -266,8 +266,9 @@ class HoonifyEmbedding(Embedding):
         request = {"input": [text] if isinstance(text, str) else text, "model": self.model}
         if self.dimension_parameter and self.dimension is not None:
             request["dimensions"] = self.dimension
-        response = self.client.embeddings.create(**request)
-        record_response("hoonify", self.model, "embed", response)
+        with metered_call("hoonify", self.model, "embed") as report:
+            response = self.client.embeddings.create(**request)
+            report(response)
         embeddings = [item.embedding for item in response.data]
         return embeddings[0] if isinstance(text, str) else embeddings
 
