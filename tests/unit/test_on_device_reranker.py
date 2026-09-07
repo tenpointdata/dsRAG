@@ -1,6 +1,8 @@
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
@@ -85,6 +87,110 @@ class TestOnDeviceReranker(unittest.TestCase):
         self.assertIsNone(reranker._session)
         self.assertIsNone(reranker._cross_encoder)
         self.assertIsNone(reranker._resolved_backend)
+
+    def test_onnx_download_excludes_unneeded_training_checkpoints(self):
+        reranker = OnDeviceReranker(model="BAAI/bge-reranker-base", backend="onnx")
+        with mock.patch(
+            "dsrag.reranker.huggingface_hub.snapshot_download",
+            return_value="/models/reranker",
+        ) as download, mock.patch(
+            "dsrag.reranker.os.path.isfile",
+            side_effect=lambda path: path.endswith("onnx/model.onnx")
+            or path.endswith("tokenizer.json"),
+        ), mock.patch(
+            "dsrag.reranker.onnxruntime.InferenceSession"
+        ), mock.patch(
+            "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock()
+        ):
+            reranker._load_onnx()
+
+        patterns = download.call_args.kwargs["allow_patterns"]
+        self.assertIn("onnx/model.onnx", patterns)
+        self.assertIn("tokenizer.json", patterns)
+        self.assertNotIn("model.safetensors", patterns)
+
+    def test_existing_huggingface_snapshot_needs_no_network_probe(self):
+        with tempfile.TemporaryDirectory() as home:
+            repository = os.path.join(home, "models--BAAI--bge-reranker-base")
+            snapshot = os.path.join(repository, "snapshots", "revision-1")
+            os.makedirs(snapshot)
+            os.makedirs(os.path.join(repository, "refs"))
+            with open(os.path.join(repository, "refs", "main"), "w", encoding="utf-8") as ref:
+                ref.write("revision-1")
+
+            reranker = OnDeviceReranker(model="BAAI/bge-reranker-base", backend="onnx")
+            with mock.patch.dict(os.environ, {"HF_HOME": home}), mock.patch(
+                "dsrag.reranker.huggingface_hub.snapshot_download"
+            ) as download:
+                resolved = reranker._resolve_model_dir()
+
+        self.assertEqual(resolved, snapshot)
+        download.assert_not_called()
+
+    def _snapshot(self, home, *files):
+        """A Hugging Face cache holding exactly `files`, as a snapshot dir."""
+        repository = os.path.join(home, "models--BAAI--bge-reranker-base")
+        snapshot = os.path.join(repository, "snapshots", "revision-1")
+        os.makedirs(os.path.join(snapshot, "onnx"), exist_ok=True)
+        os.makedirs(os.path.join(repository, "refs"), exist_ok=True)
+        with open(os.path.join(repository, "refs", "main"), "w", encoding="utf-8") as ref:
+            ref.write("revision-1")
+        for name in files:
+            with open(os.path.join(snapshot, name), "w", encoding="utf-8") as handle:
+                handle.write("x")
+        return snapshot
+
+    def test_interrupted_download_is_not_mistaken_for_a_cached_model(self):
+        # A dropped connection leaves the snapshot directory and refs/main
+        # behind with the graph still `.incomplete`. Reading that as a cache hit
+        # skipped a download that would have RESUMED from the partial blob, so
+        # every later run failed identically — one transient fault made
+        # permanent, recoverable only by deleting the cache by hand.
+        with tempfile.TemporaryDirectory() as home:
+            self._snapshot(home, "tokenizer.json")
+            finished = self._snapshot(os.path.join(home, "finished"),
+                                      "tokenizer.json", "onnx/model.onnx")
+
+            reranker = OnDeviceReranker(model="BAAI/bge-reranker-base", backend="onnx")
+            with mock.patch.dict(os.environ, {"HF_HOME": home}), mock.patch(
+                "dsrag.reranker.huggingface_hub.snapshot_download",
+                return_value=finished,
+            ) as download, mock.patch(
+                "dsrag.reranker.onnxruntime.InferenceSession"
+            ), mock.patch(
+                "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock()
+            ):
+                reranker._load_onnx()
+
+        download.assert_called_once()
+
+    def test_a_complete_cache_still_needs_no_network_probe(self):
+        # The other half of the same rule: the shortcut has to keep working
+        # when the files really are there, or every start pays for a probe.
+        with tempfile.TemporaryDirectory() as home:
+            self._snapshot(home, "tokenizer.json", "onnx/model.onnx")
+
+            reranker = OnDeviceReranker(model="BAAI/bge-reranker-base", backend="onnx")
+            with mock.patch.dict(os.environ, {"HF_HOME": home}), mock.patch(
+                "dsrag.reranker.huggingface_hub.snapshot_download"
+            ) as download, mock.patch(
+                "dsrag.reranker.onnxruntime.InferenceSession"
+            ), mock.patch(
+                "dsrag.reranker.tokenizers.Tokenizer.from_file", return_value=mock.Mock()
+            ):
+                reranker._load_onnx()
+
+        download.assert_not_called()
+
+    def test_warm_loads_the_selected_runtime_once(self):
+        reranker = OnDeviceReranker(model="local", backend="onnx")
+        reranker._load_onnx = mock.Mock()
+
+        reranker.warm()
+        reranker.warm()
+
+        reranker._load_onnx.assert_called_once_with()
+        self.assertEqual(reranker._resolved_backend, "onnx")
 
     def test_save_and_load_from_dict(self):
         reranker = OnDeviceReranker(

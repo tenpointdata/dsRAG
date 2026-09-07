@@ -221,17 +221,9 @@ class OnDeviceReranker(Reranker):
 
     # ─── Model loading ────────────────────────────────────────────────────
 
-    def _resolve_model_dir(self) -> str:
-        if self.model_dir is not None:
-            return self.model_dir
-        if os.path.isdir(self.model):
-            return self.model
-        return huggingface_hub.snapshot_download(repo_id=self.model)
-
-    def _load_onnx(self):
-        directory = self._resolve_model_dir()
-
-        graph = next(
+    def _onnx_graph_in(self, directory):
+        """The first ONNX candidate actually present in `directory`, or None."""
+        return next(
             (
                 os.path.join(directory, name)
                 for name in self.ONNX_CANDIDATES
@@ -239,6 +231,66 @@ class OnDeviceReranker(Reranker):
             ),
             None,
         )
+
+    def _cached_snapshot_dir(self, usable=None):
+        """
+        Reuse either Hugging Face cache layout without a network probe.
+
+        A snapshot directory only counts as cached when the files the caller
+        needs are IN it. An interrupted download leaves the directory and
+        `refs/main` behind with the blob still `.incomplete`, and calling that
+        a hit turns one dropped connection into a permanent failure:
+        `snapshot_download` resumes from the partial blob, but only if it is
+        reached at all.
+        """
+        home = os.environ.get("HF_HOME")
+        if not home or "/" not in self.model:
+            return None
+
+        repository = f"models--{self.model.replace('/', '--')}"
+        for cache_root in (home, os.path.join(home, "hub")):
+            repository_dir = os.path.join(cache_root, repository)
+            ref = os.path.join(repository_dir, "refs", "main")
+            try:
+                with open(ref, encoding="utf-8") as handle:
+                    revision = handle.read().strip()
+            except OSError:
+                continue
+            snapshot = os.path.join(repository_dir, "snapshots", revision)
+            if not os.path.isdir(snapshot):
+                continue
+            if usable is None or usable(snapshot):
+                return snapshot
+        return None
+
+    def _resolve_model_dir(self, allow_patterns=None, usable=None) -> str:
+        if self.model_dir is not None:
+            return self.model_dir
+        if os.path.isdir(self.model):
+            return self.model
+        cached = self._cached_snapshot_dir(usable)
+        if cached is not None:
+            return cached
+        return huggingface_hub.snapshot_download(
+            repo_id=self.model, allow_patterns=allow_patterns
+        )
+
+    def _onnx_snapshot_usable(self, directory) -> bool:
+        return self._onnx_graph_in(directory) is not None and os.path.isfile(
+            os.path.join(directory, "tokenizer.json")
+        )
+
+    def _load_onnx(self):
+        # An ONNX appliance needs one graph and one self-contained tokenizer,
+        # not the repository's PyTorch and safetensors checkpoints. Filtering
+        # here cuts the first-use download by hundreds of megabytes while an
+        # `auto` fallback can still ask sentence-transformers for its own files.
+        directory = self._resolve_model_dir(
+            allow_patterns=[*self.ONNX_CANDIDATES, "tokenizer.json"],
+            usable=self._onnx_snapshot_usable,
+        )
+
+        graph = self._onnx_graph_in(directory)
         if graph is None:
             raise FileNotFoundError(
                 f"No ONNX graph in {directory}. Looked for: {', '.join(self.ONNX_CANDIDATES)}. "
@@ -290,6 +342,10 @@ class OnDeviceReranker(Reranker):
                     f"No on-device backend could load {self.model!r}. "
                     f"onnx: {onnx_error}. sentence_transformers: {st_error}."
                 ) from st_error
+
+    def warm(self):
+        """Resolve and load the model before a user request needs it."""
+        self._ensure_loaded()
 
     # ─── Scoring ──────────────────────────────────────────────────────────
 
