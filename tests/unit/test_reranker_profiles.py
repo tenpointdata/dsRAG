@@ -14,7 +14,7 @@ import numpy as np
 
 from dsrag.reranker import OnDeviceReranker, Reranker
 from dsrag.reranker_onnx import clip_queries, configure_tokenizer, scalar_scores, score_onnx, session_options
-from dsrag.reranker_profiles import PROFILES, profile_for
+from dsrag.reranker_profiles import PROFILES, cpu_features, profile_for
 
 MODEL = "cross-encoder/ettin-reranker-32m-v1"
 
@@ -36,6 +36,33 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("4_Dense/model.safetensors", assets)
         self.assertNotIn("model.safetensors", assets)
         self.assertNotIn("onnx/model.onnx", assets)
+
+    def test_accelerated_graph_follows_the_cpu_not_the_architecture(self):
+        """The int8 kernel the runtime dispatches on is a CPU flag, not a name."""
+        profile = profile_for(MODEL)
+        vnni = frozenset({"avx", "avx2", "avx512f", "avx512_vnni"})
+        self.assertEqual(profile.graph("amd64", vnni), "onnx/model_qint8_avx512_vnni.onnx")
+        self.assertEqual(profile.graph("amd64", frozenset({"avx", "avx2"})), "onnx/model_quint8_avx2.onnx")
+        # A named architecture is a hypothetical and must never be answered
+        # with the flags of whatever machine is running the question.
+        with mock.patch("dsrag.reranker_profiles.cpu_features", return_value=vnni):
+            self.assertEqual(profile.graph("arm64"), "onnx/model_qint8_arm64.onnx")
+            self.assertEqual(profile.graph("amd64"), "onnx/model_quint8_avx2.onnx")
+
+    def test_accelerated_graph_is_requested_from_the_hub(self):
+        """The upgrade is only real if the asset list asks for that file."""
+        vnni = frozenset({"avx2", "avx512_vnni"})
+        with mock.patch("dsrag.reranker_profiles.platform.machine", return_value="x86_64"), \
+             mock.patch("dsrag.reranker_profiles.cpu_features", return_value=vnni):
+            assets = ettin()._onnx_assets()
+        self.assertIn("onnx/model_qint8_avx512_vnni.onnx", assets)
+        self.assertNotIn("onnx/model_quint8_avx2.onnx", assets)
+
+    def test_cpu_features_never_raises_off_linux(self):
+        cpu_features.cache_clear()
+        with mock.patch("builtins.open", side_effect=OSError("no such file")):
+            self.assertEqual(cpu_features(), frozenset())
+        cpu_features.cache_clear()
 
     def test_pinned_cache_does_not_follow_main(self):
         with tempfile.TemporaryDirectory() as home:
