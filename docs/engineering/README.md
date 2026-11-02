@@ -18,9 +18,9 @@ The root [AGENTS.md](../../AGENTS.md) records the shared 600-line web-source rul
 
 | Capability | Owning code | Invariant |
 | --- | --- | --- |
-| Retrieval pipeline | `dsrag/knowledge_base.py`, `dsrag/retrieval.py`, `dsrag/rse.py` | Keep query and ingest representation compatible |
+| Retrieval pipeline | `dsrag/knowledge_base.py` (`query`), `dsrag/rse.py` | Keep query and ingest representation compatible |
 | Parsing and sectioning | `dsrag/dsparse/` | Preserve document and citation provenance |
-| Provider interfaces | `embedding.py`, `reranker.py`, `llm.py` | Model-specific behavior belongs in adapters |
+| Provider interfaces | `dsrag/embedding.py`, `dsrag/reranker.py`, `dsrag/llm.py` | Model-specific behavior belongs in adapters |
 | Storage adapters | `dsrag/database/`, `dsrag/metadata.py` | One metadata/filter contract across backends |
 | Fixtures and corpora | `tests/README.md`, `tests/fetch_corpora.py` | Preserve fixture bytes; optional downloads stay local |
 
