@@ -2,6 +2,7 @@ import time
 from typing import Any, Optional
 
 from dsrag.database.chunk.db import ChunkDB
+from dsrag.database.chunk.metadata_codec import decode_chunk_metadata
 from dsrag.database.chunk.types import FormattedDocument
 from dsrag.utils.imports import LazyLoader
 
@@ -173,9 +174,7 @@ class PostgresChunkDB(ChunkDB):
         created_on = results[0][columns.index("created_on")]
         metadata = results[0][columns.index("metadata")]
 
-        # Convert the metadata string back into a dictionary
-        if metadata:
-            metadata = eval(metadata)
+        metadata = decode_chunk_metadata(metadata)
 
         return FormattedDocument(
             id=doc_id,
