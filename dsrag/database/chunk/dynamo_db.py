@@ -4,6 +4,7 @@ from decimal import Decimal
 import time
 from dsrag.utils.imports import boto3
 from dsrag.database.chunk.db import ChunkDB
+from dsrag.database.chunk.metadata_codec import decode_chunk_metadata
 from dsrag.database.chunk.types import FormattedDocument
 
 
@@ -292,11 +293,7 @@ class DynamoDB(ChunkDB):
                     created_on = item.get('created_on')
                     if isinstance(created_on, Decimal):
                         created_on = int(created_on)
-                    metadata = item.get('metadata')
-
-                    # If metadata is stored as a string, convert it back to a dictionary
-                    if metadata and isinstance(metadata, str):
-                        metadata = eval(metadata)  # Be cautious with eval; consider safer alternatives
+                    metadata = decode_chunk_metadata(item.get('metadata'))
 
                 # Collect chunks if include_content is True
                 if include_content:
